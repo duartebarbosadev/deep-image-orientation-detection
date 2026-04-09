@@ -1,19 +1,108 @@
-import torch
-import os
 import argparse
 import logging
+import os
+import sys
 import time
 
+import torch
+import torch.nn as nn
+import torchvision.models as models
+import torchvision.transforms as transforms
+
 import config
-from src.dataset import discover_image_files
-from src.model import get_orientation_model
-from src.utils import (
-    get_device,
-    get_data_transforms,
-    load_image_safely,
-    load_torch_artifact,
-    setup_logging,
-)
+from PIL import Image, ImageOps
+
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+
+def normalize_image_path(image_path: str) -> str:
+    return os.path.normcase(os.path.realpath(image_path))
+
+
+def discover_image_files(root_dir: str) -> list[str]:
+    image_files = []
+    for root, _, files in os.walk(root_dir):
+        for filename in files:
+            if filename.lower().endswith(IMAGE_EXTENSIONS):
+                image_files.append(normalize_image_path(os.path.join(root, filename)))
+
+    image_files.sort()
+    if not image_files:
+        raise ValueError(f"No images found in the directory: {root_dir}")
+
+    return image_files
+
+
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        logging.info("CUDA is available. Using GPU.")
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        logging.info("MPS is available. Using Apple Silicon GPU.")
+    else:
+        device = torch.device("cpu")
+        logging.info("CUDA and MPS not available. Using CPU.")
+    return device
+
+
+def get_data_transforms() -> dict:
+    return {
+        "val": transforms.Compose(
+            [
+                transforms.Resize((config.IMAGE_SIZE + 32, config.IMAGE_SIZE + 32)),
+                transforms.CenterCrop(config.IMAGE_SIZE),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                ),
+            ]
+        )
+    }
+
+
+def load_image_safely(path: str) -> Image.Image:
+    with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img)
+
+        if img.mode in ("RGB", "L"):
+            return img.convert("RGB")
+
+        rgba_img = img.convert("RGBA")
+        background = Image.new("RGB", rgba_img.size, (255, 255, 255))
+        background.paste(rgba_img, mask=rgba_img)
+        return background
+
+
+def load_torch_artifact(path: str, map_location=None):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError as exc:
+        raise RuntimeError(
+            "This project requires a PyTorch version that supports "
+            "torch.load(..., weights_only=True)."
+        ) from exc
+
+
+def get_orientation_model(pretrained: bool = True):
+    weights = models.EfficientNet_V2_S_Weights.IMAGENET1K_V1 if pretrained else None
+    model = models.efficientnet_v2_s(weights=weights)
+    num_features = model.classifier[1].in_features
+    model.classifier = nn.Sequential(
+        nn.Dropout(p=0.3, inplace=True),
+        nn.Linear(num_features, config.NUM_CLASSES),
+    )
+    return model
 
 
 def predict_single_image(model, image_path, device, transforms):

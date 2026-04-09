@@ -1,15 +1,74 @@
 import argparse
 import logging
 import os
+import sys
 import time
 
 import numpy as np
 import onnxruntime
 import torch
+import torchvision.transforms as transforms
 
 import config
-from src.dataset import discover_image_files
-from src.utils import get_data_transforms, load_image_safely, setup_logging
+from PIL import Image, ImageOps
+
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+
+def normalize_image_path(image_path: str) -> str:
+    return os.path.normcase(os.path.realpath(image_path))
+
+
+def discover_image_files(root_dir: str) -> list[str]:
+    image_files = []
+    for root, _, files in os.walk(root_dir):
+        for filename in files:
+            if filename.lower().endswith(IMAGE_EXTENSIONS):
+                image_files.append(normalize_image_path(os.path.join(root, filename)))
+
+    image_files.sort()
+    if not image_files:
+        raise ValueError(f"No images found in the directory: {root_dir}")
+
+    return image_files
+
+
+def get_data_transforms() -> dict:
+    return {
+        "val": transforms.Compose(
+            [
+                transforms.Resize((config.IMAGE_SIZE + 32, config.IMAGE_SIZE + 32)),
+                transforms.CenterCrop(config.IMAGE_SIZE),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                ),
+            ]
+        )
+    }
+
+
+def load_image_safely(path: str) -> Image.Image:
+    with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img)
+
+        if img.mode in ("RGB", "L"):
+            return img.convert("RGB")
+
+        rgba_img = img.convert("RGBA")
+        background = Image.new("RGB", rgba_img.size, (255, 255, 255))
+        background.paste(rgba_img, mask=rgba_img)
+        return background
 
 
 PREFERRED_PROVIDERS = [
