@@ -1,22 +1,139 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split, Subset
-from copy import deepcopy
+from torch.utils.data import DataLoader
+import json
 import os
 import argparse
 import logging
-import shutil
 import time
 
 import torch.amp as amp
 import config
 from src.caching import cache_dataset
-from src.dataset import ImageOrientationDataset, ImageOrientationDatasetFromCache
+from src.dataset import (
+    ImageOrientationDataset,
+    ImageOrientationDatasetFromCache,
+    build_source_id,
+    discover_upright_image_files,
+    split_image_files,
+)
 from src.model import get_orientation_model
 from src.utils import get_device, setup_logging, get_data_transforms
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
+
+
+SPLIT_STATE_FILENAME = "train_val_split.json"
+
+
+def get_split_state_path(model_dir: str) -> str:
+    return os.path.join(model_dir, SPLIT_STATE_FILENAME)
+
+
+def load_saved_split_state(model_dir: str):
+    split_state_path = get_split_state_path(model_dir)
+    if not os.path.exists(split_state_path):
+        return None
+
+    with open(split_state_path, "r", encoding="utf-8") as handle:
+        split_state = json.load(handle)
+
+    if not isinstance(split_state, dict):
+        raise ValueError(f"Invalid split state file: '{split_state_path}'.")
+
+    train_image_files = split_state.get("train_image_files")
+    val_image_files = split_state.get("val_image_files")
+    if not isinstance(train_image_files, list) or not isinstance(val_image_files, list):
+        raise ValueError(f"Invalid split state file: '{split_state_path}'.")
+    if not train_image_files or not val_image_files:
+        raise ValueError(f"Split state file is empty: '{split_state_path}'.")
+
+    return split_state
+
+
+def save_split_state(model_dir: str, split_seed: int, train_image_files, val_image_files):
+    split_state_path = get_split_state_path(model_dir)
+    split_state = {
+        "split_seed": split_seed,
+        "train_image_files": list(train_image_files),
+        "val_image_files": list(val_image_files),
+    }
+
+    with open(split_state_path, "w", encoding="utf-8") as handle:
+        json.dump(split_state, handle, indent=2)
+
+
+def build_train_val_datasets(args, data_transforms, split_state=None, split_seed=None):
+    """Builds train and validation datasets from disjoint source image splits."""
+    if split_state is None:
+        effective_seed = args.seed if split_seed is None else split_seed
+        source_image_files = discover_upright_image_files(args.data_dir)
+        train_image_files, val_image_files = split_image_files(
+            source_image_files, train_ratio=0.8, seed=effective_seed
+        )
+
+        logging.info(f"Discovered {len(source_image_files)} source images.")
+        logging.info(
+            f"Split into Training: {len(train_image_files)} source images, "
+            f"Validation: {len(val_image_files)} source images."
+        )
+    else:
+        train_image_files = [os.path.abspath(path) for path in split_state["train_image_files"]]
+        val_image_files = [os.path.abspath(path) for path in split_state["val_image_files"]]
+        split_seed = split_state.get("split_seed")
+
+        if set(train_image_files) & set(val_image_files):
+            raise ValueError("Saved train/validation split contains overlapping source images.")
+
+        missing_files = [
+            path
+            for path in train_image_files + val_image_files
+            if not os.path.exists(path)
+        ]
+        if missing_files:
+            raise FileNotFoundError(
+                f"Saved split references {len(missing_files)} missing source images."
+            )
+
+        logging.info(
+            "Using train/validation split restored from saved state"
+            + (f" (seed {split_seed})." if split_seed is not None else ".")
+        )
+        logging.info(
+            f"Restored Training: {len(train_image_files)} source images, "
+            f"Validation: {len(val_image_files)} source images."
+        )
+
+    if config.USE_CACHE:
+        cache_num_workers = None if args.workers == 0 else args.workers
+        cache_dataset(
+            upright_dir=args.data_dir,
+            num_workers=cache_num_workers,
+            force_rebuild=args.force_rebuild_cache,
+        )
+        train_dataset = ImageOrientationDatasetFromCache(
+            cache_dir=config.CACHE_DIR,
+            source_ids=[build_source_id(path) for path in train_image_files],
+            transform=data_transforms["train"],
+        )
+        val_dataset = ImageOrientationDatasetFromCache(
+            cache_dir=config.CACHE_DIR,
+            source_ids=[build_source_id(path) for path in val_image_files],
+            transform=data_transforms["val"],
+        )
+        logging.info("Successfully loaded training and validation datasets from cache.")
+    else:
+        logging.info("Using ON-THE-FLY image processing (caching is disabled).")
+        train_dataset = ImageOrientationDataset(
+            image_files=train_image_files, transform=data_transforms["train"]
+        )
+        val_dataset = ImageOrientationDataset(
+            image_files=val_image_files, transform=data_transforms["val"]
+        )
+        logging.info("Successfully loaded dataset for on-the-fly processing.")
+
+    return train_dataset, val_dataset, train_image_files, val_image_files
 
 
 def train(args):
@@ -39,6 +156,7 @@ def train(args):
     logging.info(f"  - Batch Size: {args.batch_size}")
     logging.info(f"  - Learning Rate: {args.lr}")
     logging.info(f"  - Dataloader Workers: {args.workers}")
+    logging.info(f"  - Train/Validation Split Seed: {args.seed}")
 
     writer = SummaryWriter(f"runs/{config.MODEL_NAME}")
 
@@ -46,6 +164,7 @@ def train(args):
     os.makedirs(args.model_dir, exist_ok=True)
 
     device = get_device()
+    checkpoint_path = os.path.join(args.model_dir, "checkpoint.pth")
 
     # Determine if pin_memory should be used
     pin_memory_enabled = device.type == "cuda"
@@ -57,68 +176,92 @@ def train(args):
     ### Dataset and Dataloader logic
     logging.info("\n--- Initializing Dataset and Dataloaders ---")
     data_transforms = get_data_transforms()
+    saved_split_state = None
+    effective_split_seed = args.seed
+    resume_checkpoint = None
 
-    # 1. Create a single, full dataset instance without any transforms yet.
-    #    This 'base_dataset' will be the source for our splits.
-    try:
-        if config.USE_CACHE:
-            cache_dataset(force_rebuild=args.force_rebuild_cache)
-            base_dataset = ImageOrientationDatasetFromCache(
-                cache_dir=config.CACHE_DIR, transform=None
-            )
-            logging.info(
-                f"Successfully loaded dataset from CACHE ({len(base_dataset)} images)."
-            )
+    if args.resume:
+        try:
+            saved_split_state = load_saved_split_state(args.model_dir)
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            logging.error(f"Failed to load saved train/validation split: {e}")
+            return
+
+        if saved_split_state is not None:
+            saved_seed = saved_split_state.get("split_seed")
+            if saved_seed is not None:
+                effective_split_seed = saved_seed
+                if saved_seed != args.seed:
+                    logging.warning(
+                        f"Saved split was created with seed {saved_seed}. "
+                        f"Ignoring CLI seed {args.seed} and reusing the saved split."
+                    )
         else:
-            logging.info("Using ON-THE-FLY image processing (caching is disabled).")
-            base_dataset = ImageOrientationDataset(
-                upright_dir=args.data_dir, transform=None
+            logging.warning(
+                "Resume was requested but no saved split state was found. "
+                "Falling back to checkpoint metadata if available, otherwise the current CLI seed."
             )
-            logging.info(f"Successfully loaded dataset for on-the-fly processing.")
-            logging.info(
-                f"Dataset found {len(base_dataset.image_files)} original image files."
-            )
-            logging.info(f"Total dataset size (with 4 rotations): {len(base_dataset)}")
+            if os.path.exists(checkpoint_path):
+                try:
+                    resume_checkpoint = torch.load(checkpoint_path, map_location=device)
+                    saved_seed = resume_checkpoint.get("split_seed")
+                    if saved_seed is not None:
+                        effective_split_seed = saved_seed
+                        if saved_seed != args.seed:
+                            logging.warning(
+                                f"Checkpoint was created with split seed {saved_seed}. "
+                                f"Ignoring CLI seed {args.seed} and reusing that seed."
+                            )
+                except Exception as e:
+                    logging.warning(
+                        f"Could not read split seed from checkpoint metadata: {e}"
+                    )
 
+    logging.info(f"  - Effective Train/Validation Split Seed: {effective_split_seed}")
+
+    try:
+        train_dataset, val_dataset, train_image_files, val_image_files = (
+            build_train_val_datasets(
+                args,
+                data_transforms,
+                split_state=saved_split_state,
+                split_seed=effective_split_seed,
+            )
+        )
     except (ValueError, FileNotFoundError) as e:
         logging.error(f"Failed to initialize dataset: {e}")
         return
 
-    # 2. Split the single dataset instance *once* to get disjoint sets of indices.
-    train_size = int(0.8 * len(base_dataset))
-    val_size = len(base_dataset) - train_size
-    # For reproducibility, you could use a torch.Generator: g = torch.Generator().manual_seed(42)
-    train_subset, val_subset = random_split(base_dataset, [train_size, val_size])
-
-    # 3. Apply the correct transforms to each subset *after* splitting.
-    #    We create deepcopies of the base dataset, each with its own transform,
-    #    and assign them to the appropriate subset. This prevents the validation
-    #    set from seeing augmented training data.
-    train_subset.dataset = deepcopy(base_dataset)
-    train_subset.dataset.transform = data_transforms["train"]
-
-    val_subset.dataset = deepcopy(base_dataset)
-    val_subset.dataset.transform = data_transforms["val"]
+    if saved_split_state is None:
+        save_split_state(
+            args.model_dir,
+            split_seed=effective_split_seed,
+            train_image_files=train_image_files,
+            val_image_files=val_image_files,
+        )
+        logging.info(
+            f"Saved train/validation split state to {get_split_state_path(args.model_dir)}"
+        )
 
     logging.info(
-        f"Splitting into Training: {len(train_subset)} samples, Validation: {len(val_subset)} samples."
+        f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}."
     )
 
     train_loader = DataLoader(
-        train_subset,
+        train_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         num_workers=args.workers,
         pin_memory=pin_memory_enabled,
-        persistent_workers=True,
+        persistent_workers=args.workers > 0,
     )
     val_loader = DataLoader(
-        val_subset,
+        val_dataset,
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.workers,
         pin_memory=pin_memory_enabled,
-        persistent_workers=True,
+        persistent_workers=args.workers > 0,
     )
     logging.info("Dataloaders created successfully.")
 
@@ -154,12 +297,13 @@ def train(args):
     start_epoch = 0
     best_val_acc = 0.0
     epochs_no_improve = 0
-    checkpoint_path = os.path.join(args.model_dir, "checkpoint.pth")
 
     if args.resume and os.path.exists(checkpoint_path):
         logging.info(f"\n--- Resuming training from checkpoint: {checkpoint_path} ---")
         try:
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = resume_checkpoint
+            if checkpoint is None:
+                checkpoint = torch.load(checkpoint_path, map_location=device)
 
             # Load model state
             original_model.load_state_dict(checkpoint["model_state_dict"])
@@ -211,8 +355,8 @@ def train(args):
             running_loss += loss.item() * inputs.size(0)
             running_corrects += torch.sum(preds == labels.data)
 
-        epoch_loss = running_loss / len(train_subset)
-        epoch_acc = running_corrects.float() / len(train_subset)
+        epoch_loss = running_loss / len(train_dataset)
+        epoch_acc = running_corrects.float() / len(train_dataset)
 
         # --- Validation Phase ---
         model_for_training.eval()
@@ -233,8 +377,8 @@ def train(args):
                 val_loss += loss.item() * inputs.size(0)
                 val_corrects += torch.sum(preds == labels.data)
 
-        val_epoch_loss = val_loss / len(val_subset)
-        val_epoch_acc = val_corrects.float() / len(val_subset)
+        val_epoch_loss = val_loss / len(val_dataset)
+        val_epoch_acc = val_corrects.float() / len(val_dataset)
 
         scheduler.step()
 
@@ -288,6 +432,7 @@ def train(args):
             "scheduler_state_dict": scheduler.state_dict(),
             "best_val_acc": best_val_acc,
             "epochs_no_improve": epochs_no_improve,
+            "split_seed": effective_split_seed,
         }
         torch.save(checkpoint, checkpoint_path)
         logging.debug(f"Checkpoint saved to {checkpoint_path}")
@@ -359,6 +504,12 @@ if __name__ == "__main__":
         type=int,
         default=config.NUM_WORKERS,
         help="Number of data loading workers.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+        help="Random seed used for the train/validation split.",
     )
     parser.add_argument(
         "--force-rebuild-cache",

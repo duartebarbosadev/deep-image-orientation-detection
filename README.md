@@ -32,7 +32,7 @@ The model was trained on several datasets:
 - **TextOCR - Text Extraction from Images Dataset:** A dataset from Kaggle ([link](https://www.kaggle.com/datasets/robikscube/textocr-text-extraction-from-images-dataset?resource=download)) was included to improve the model's ability to detect the orientation of images containing text. (However over 1300 images needed have the orientation manually corrected like 0007a5a18213563f.jpg)
 - **Personal Images:** A small, curated collection of personal photographs to include unique examples and edge cases.
 
-The model was trained on a huge dataset of **189,018** unique images. Each image is augmented by being rotated in four ways (0°, 90°, 180°, 270°), creating a total of **756,072** samples. This augmented dataset was then split into **604,857 samples for training** and **151,215 samples for validation**.
+The model v2 was trained on a huge dataset of **189,018** unique images. Each image is augmented by being rotated in four ways (0°, 90°, 180°, 270°), creating a total of **756,072** samples. This augmented dataset was then split into **604,857 samples for training** and **151,215 samples for validation**.
 
 ## Project Structure
 
@@ -194,6 +194,12 @@ Once all data is in place and the configuration is set,  start training the mode
 
 ```bash
 python train.py
+```
+
+Use `--seed` to make the train/validation split reproducible:
+
+```bash
+python train.py --seed 42
 ```
 
 - **First Run**: The first time the script runs, it will preprocess and cache the dataset. This may take a while depending on the size of the dataset.

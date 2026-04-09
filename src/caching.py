@@ -1,45 +1,74 @@
-import os
+import json
 import logging
-from PIL import Image
-from tqdm import tqdm
+import os
 from multiprocessing import Pool, cpu_count
+
+from PIL import Image
+
 import config
+from tqdm import tqdm
+
+from src.dataset import (
+    build_source_id,
+    discover_upright_image_files,
+    get_cache_failures_path,
+    get_cache_manifest_path,
+    normalize_source_path,
+)
 from src.utils import load_image_safely
 
 
-def process_and_cache_image(image_path: str):
+def process_and_cache_image(args):
     """
     Worker function to process a single image. It uses the robust loader,
     creates four rotated versions, and saves them to the cache directory.
     """
+    image_path, cache_dir = args
+    source_path = normalize_source_path(image_path)
     try:
-        cache_dir = config.CACHE_DIR
-        original_filename = os.path.splitext(os.path.basename(image_path))[0]
+        source_id = build_source_id(source_path)
 
         # Use the single, robust image loader from utils
-        img = load_image_safely(image_path)
+        img = load_image_safely(source_path)
+        manifest_entries = []
 
         # Use the rotation definition from config
         for label, angle in config.ROTATIONS.items():
             rotated_img = img.rotate(angle, resample=Image.BICUBIC, expand=True)
-            cached_filename = f"{original_filename}__{label}.png"
+            cached_filename = f"{source_id}__{label}.png"
             save_path = os.path.join(cache_dir, cached_filename)
             rotated_img.save(save_path, "PNG")
+            manifest_entries.append(
+                {
+                    "source_path": source_path,
+                    "source_id": source_id,
+                    "cached_path": os.path.abspath(save_path),
+                    "label": label,
+                }
+            )
 
-        return None
+        return {"entries": manifest_entries, "failure": None}
 
     except Exception as e:
         logging.warning(f"Could not process and cache {image_path}. Error: {e}")
-        return image_path
+        return {
+            "entries": [],
+            "failure": {
+                "source_path": source_path,
+                "source_id": build_source_id(source_path),
+            },
+        }
 
 
-def cache_dataset(force_rebuild=False):
+def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
     """
     Applies rotations to all images and saves them to a cache, using
     multiple processes.
     """
-    upright_dir = config.DATA_DIR
+    upright_dir = upright_dir or config.DATA_DIR
     cache_dir = config.CACHE_DIR
+    manifest_path = get_cache_manifest_path(cache_dir)
+    failures_path = get_cache_failures_path(cache_dir)
 
     if not os.path.exists(upright_dir):
         logging.error(f"Source data directory not found: {upright_dir}")
@@ -47,52 +76,76 @@ def cache_dataset(force_rebuild=False):
 
     os.makedirs(cache_dir, exist_ok=True)
 
-    # --- Enhanced Cache Check & Logging ---
-    cached_files = os.listdir(cache_dir)
+    cached_files = [f for f in os.listdir(cache_dir) if f.endswith(".png")]
     if force_rebuild:
         logging.info(
-            f"Force rebuild is True. Clearing {len(cached_files)} files from cache directory: {cache_dir}"
+            f"Force rebuild is True. Clearing {len(cached_files)} cached files from cache directory: {cache_dir}"
         )
         for f in cached_files:
             os.remove(os.path.join(cache_dir, f))
-        cached_files = []  # Reset file list
+        if os.path.exists(manifest_path):
+            os.remove(manifest_path)
+        if os.path.exists(failures_path):
+            os.remove(failures_path)
+        cached_files = []
 
-    if cached_files:
+    if cached_files and os.path.exists(manifest_path):
         logging.info(
             f"Cache already exists with {len(cached_files)} files at '{cache_dir}'. Skipping rebuild."
         )
         return
-    else:
-        logging.info("Cache is empty or was cleared. Starting build process...")
+    if cached_files or os.path.exists(manifest_path):
+        logging.info("Cache contents and manifest are out of sync. Rebuilding cache...")
+        for f in cached_files:
+            os.remove(os.path.join(cache_dir, f))
+        if os.path.exists(manifest_path):
+            os.remove(manifest_path)
+        if os.path.exists(failures_path):
+            os.remove(failures_path)
 
-    image_files = [
-        os.path.join(root, f)
-        for root, _, files in os.walk(upright_dir)
-        for f in files
-        if f.lower().endswith((".png", ".jpg", ".jpeg"))
-    ]
+    logging.info("Cache is empty or was cleared. Starting build process...")
 
-    if not image_files:
-        raise ValueError(f"No images found in {upright_dir}")
+    image_files = discover_upright_image_files(upright_dir)
 
-    num_workers = config.NUM_WORKERS if config.NUM_WORKERS > 0 else cpu_count()
+    configured_workers = config.NUM_WORKERS if num_workers is None else num_workers
+    num_workers = configured_workers if configured_workers > 0 else cpu_count()
     logging.info(f"Building cache with {num_workers} worker processes...")
 
     with Pool(processes=num_workers) as pool:
         results = list(
             tqdm(
-                pool.imap_unordered(process_and_cache_image, image_files),
+                pool.imap_unordered(
+                    process_and_cache_image,
+                    [(image_path, cache_dir) for image_path in image_files],
+                ),
                 total=len(image_files),
                 desc="Caching Images",
             )
         )
 
-    failures = [r for r in results if r is not None]
-    if failures:
-        logging.warning(
-            f"Warning: {len(failures)} out of {len(image_files)} images failed to process. Check logs for details."
-        )
+    manifest_entries = []
+    failures = []
+    for result in results:
+        manifest_entries.extend(result["entries"])
+        if result["failure"] is not None:
+            failures.append(result["failure"])
 
+    if failures:
+        failures.sort(key=lambda failure: failure["source_path"])
+        with open(failures_path, "w", encoding="utf-8") as handle:
+            json.dump(failures, handle, indent=2)
+        logging.warning(
+            f"Warning: {len(failures)} out of {len(image_files)} images failed to process. "
+            f"Failed source IDs were recorded in '{failures_path}'."
+        )
+    elif os.path.exists(failures_path):
+        os.remove(failures_path)
+
+    manifest_entries.sort(key=lambda entry: (entry["source_path"], entry["label"]))
+    with open(manifest_path, "w", encoding="utf-8") as handle:
+        json.dump(manifest_entries, handle, indent=2)
+
+    cached_file_count = len([f for f in os.listdir(cache_dir) if f.endswith(".png")])
     logging.info(
-        f"Successfully built image cache with {len(os.listdir(cache_dir))} files."
+        f"Successfully built image cache with {cached_file_count} files."
     )
