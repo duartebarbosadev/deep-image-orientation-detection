@@ -4,10 +4,12 @@ import tempfile
 import unittest
 from collections import Counter
 from types import SimpleNamespace
+from unittest import mock
 
 from PIL import Image
 
 import config
+import src.caching as caching_module
 import train as train_module
 from src.dataset import (
     ImageOrientationDataset,
@@ -288,6 +290,88 @@ class DatasetSplitTests(unittest.TestCase):
         self.assertEqual(len(train_dataset), len(train_files) * expected_rotations)
         self.assertEqual(len(val_dataset), len(val_files) * expected_rotations)
         self.assertTrue(set(train_files).isdisjoint(val_files))
+
+    def test_build_train_val_datasets_threads_cli_cache_args(self):
+        args = SimpleNamespace(
+            data_dir=self.data_dir,
+            seed=17,
+            workers=3,
+            force_rebuild_cache=True,
+        )
+
+        original_use_cache = config.USE_CACHE
+        config.USE_CACHE = True
+        try:
+            with mock.patch.object(train_module, "cache_dataset") as cache_dataset_mock, mock.patch.object(
+                train_module,
+                "ImageOrientationDatasetFromCache",
+                side_effect=["train-cache", "val-cache"],
+            ):
+                train_dataset, val_dataset, _, _ = train_module.build_train_val_datasets(
+                    args, {"train": None, "val": None}
+                )
+        finally:
+            config.USE_CACHE = original_use_cache
+
+        cache_dataset_mock.assert_called_once_with(
+            upright_dir=self.data_dir,
+            num_workers=3,
+            force_rebuild=True,
+        )
+        self.assertEqual(train_dataset, "train-cache")
+        self.assertEqual(val_dataset, "val-cache")
+
+    def test_build_train_val_datasets_preserves_zero_workers_for_cache(self):
+        args = SimpleNamespace(
+            data_dir=self.data_dir,
+            seed=17,
+            workers=0,
+            force_rebuild_cache=False,
+        )
+
+        original_use_cache = config.USE_CACHE
+        config.USE_CACHE = True
+        try:
+            with mock.patch.object(train_module, "cache_dataset") as cache_dataset_mock, mock.patch.object(
+                train_module,
+                "ImageOrientationDatasetFromCache",
+                side_effect=["train-cache", "val-cache"],
+            ):
+                train_module.build_train_val_datasets(args, {"train": None, "val": None})
+        finally:
+            config.USE_CACHE = original_use_cache
+
+        cache_dataset_mock.assert_called_once_with(
+            upright_dir=self.data_dir,
+            num_workers=0,
+            force_rebuild=False,
+        )
+
+    def test_cache_dataset_honors_upright_dir_and_zero_workers(self):
+        cache_dir = os.path.join(self.temp_dir.name, "cache_out")
+        original_cache_dir = config.CACHE_DIR
+        original_data_dir = config.DATA_DIR
+        config.CACHE_DIR = cache_dir
+        config.DATA_DIR = os.path.join(self.temp_dir.name, "missing_data_dir")
+        self.addCleanup(setattr, config, "CACHE_DIR", original_cache_dir)
+        self.addCleanup(setattr, config, "DATA_DIR", original_data_dir)
+
+        with mock.patch.object(
+            caching_module, "Pool", side_effect=AssertionError("Pool should not be used")
+        ):
+            caching_module.cache_dataset(
+                upright_dir=self.data_dir,
+                num_workers=0,
+                force_rebuild=True,
+            )
+
+        manifest_path = get_cache_manifest_path(cache_dir)
+        with open(manifest_path, "r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+
+        self.assertEqual(len(manifest), len(self.image_paths) * len(config.ROTATIONS))
+        cached_files = [f for f in os.listdir(cache_dir) if f.endswith(".png")]
+        self.assertEqual(len(cached_files), len(manifest))
 
     def test_saved_split_state_round_trips_and_overrides_new_seed(self):
         discovered_files = discover_upright_image_files(self.data_dir)
