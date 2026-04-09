@@ -351,8 +351,13 @@ def train(args):
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
             scaler_state_dict = checkpoint.get("scaler_state_dict")
-            if scaler_state_dict is not None and scaler.is_enabled():
-                scaler.load_state_dict(scaler_state_dict)
+            if scaler.is_enabled():
+                if scaler_state_dict:
+                    scaler.load_state_dict(scaler_state_dict)
+                elif scaler_state_dict == {}:
+                    logging.info(
+                        "Checkpoint has no active GradScaler state; using a fresh scaler."
+                    )
 
             # Load training progress
             start_epoch = checkpoint["epoch"] + 1

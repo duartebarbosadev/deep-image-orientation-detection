@@ -66,9 +66,11 @@ def get_autocast_context(device: torch.device):
 
 def get_grad_scaler(device: torch.device) -> torch.amp.GradScaler:
     """
-    Returns a GradScaler for device types that benefit from float16 AMP.
+    Returns a GradScaler only when the configured AMP dtype uses float16.
     """
-    use_grad_scaler = device.type in {"cuda", "mps"}
+    autocast_kwargs = get_amp_autocast_kwargs(device)
+    autocast_dtype = None if autocast_kwargs is None else autocast_kwargs.get("dtype")
+    use_grad_scaler = autocast_dtype == torch.float16
     return torch.amp.GradScaler(device=device.type, enabled=use_grad_scaler)
 
 
