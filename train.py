@@ -8,6 +8,8 @@ import argparse
 import logging
 import time
 
+from tqdm import tqdm
+
 import config
 from src.caching import cache_dataset
 from src.dataset import (
@@ -309,10 +311,12 @@ def train(args):
     # This will be the model instance used for training/inference during the loop
     model_for_training = original_model
 
-    # Compile the model for performance if PyTorch 2.0+ is used
-    if hasattr(torch, "compile"):
-        logging.info("PyTorch 2.0+ detected. Compiling the model for performance...")
+    # Compile the model for performance — CUDA only (MPS/CPU don't benefit)
+    if hasattr(torch, "compile") and device.type == "cuda":
+        logging.info("CUDA detected. Compiling model with torch.compile (reduce-overhead)...")
         model_for_training = torch.compile(original_model, mode="reduce-overhead")
+    else:
+        logging.info(f"Skipping torch.compile (not supported efficiently on {device.type.upper()}).")
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)  # Add label_smoothing
 
@@ -382,7 +386,19 @@ def train(args):
         # --- Training Phase ---
         model_for_training.train()
         running_loss, running_corrects = 0.0, 0
-        for inputs, labels in train_loader:
+        train_data_time, train_compute_time = 0.0, 0.0
+
+        train_bar = tqdm(
+            train_loader,
+            desc=f"Epoch {epoch + 1:02d}/{args.epochs} [Train]",
+            leave=False,
+            unit="batch",
+        )
+        batch_start = time.time()
+        for inputs, labels in train_bar:
+            train_data_time += time.time() - batch_start
+
+            compute_start = time.time()
             inputs, labels = move_batch_to_device(
                 inputs,
                 labels,
@@ -406,6 +422,13 @@ def train(args):
             _, preds = torch.max(outputs, 1)
             running_loss += loss.item() * inputs.size(0)
             running_corrects += torch.sum(preds == labels.data)
+            train_compute_time += time.time() - compute_start
+
+            train_bar.set_postfix(
+                loss=f"{loss.item():.4f}",
+                data_ms=f"{train_data_time * 1000 / (train_bar.n + 1):.0f}",
+            )
+            batch_start = time.time()
 
         epoch_loss = running_loss / len(train_dataset)
         epoch_acc = running_corrects.float() / len(train_dataset)
@@ -413,9 +436,20 @@ def train(args):
         # --- Validation Phase ---
         model_for_training.eval()
         val_loss, val_corrects = 0.0, 0
+        val_data_time, val_compute_time = 0.0, 0.0
 
+        val_bar = tqdm(
+            val_loader,
+            desc=f"Epoch {epoch + 1:02d}/{args.epochs} [Val]  ",
+            leave=False,
+            unit="batch",
+        )
         with torch.no_grad():
-            for inputs, labels in val_loader:
+            batch_start = time.time()
+            for inputs, labels in val_bar:
+                val_data_time += time.time() - batch_start
+
+                compute_start = time.time()
                 inputs, labels = move_batch_to_device(
                     inputs,
                     labels,
@@ -430,6 +464,13 @@ def train(args):
                 _, preds = torch.max(outputs, 1)
                 val_loss += loss.item() * inputs.size(0)
                 val_corrects += torch.sum(preds == labels.data)
+                val_compute_time += time.time() - compute_start
+
+                val_bar.set_postfix(
+                    loss=f"{loss.item():.4f}",
+                    data_ms=f"{val_data_time * 1000 / (val_bar.n + 1):.0f}",
+                )
+                batch_start = time.time()
 
         val_epoch_loss = val_loss / len(val_dataset)
         val_epoch_acc = val_corrects.float() / len(val_dataset)
@@ -444,6 +485,14 @@ def train(args):
             f"Val Loss: {val_epoch_loss:.4f} Acc: {val_epoch_acc:.4f} | "
             f"LR: {optimizer.param_groups[0]['lr']:.2e} | "
             f"Duration: {epoch_duration:.2f}s"
+        )
+        total_io = train_data_time + val_data_time
+        total_compute = train_compute_time + val_compute_time
+        logging.info(
+            f"         Data loading: {total_io:.1f}s "
+            f"({total_io / max(epoch_duration, 1e-6) * 100:.0f}% of epoch) | "
+            f"Compute: {total_compute:.1f}s "
+            f"({total_compute / max(epoch_duration, 1e-6) * 100:.0f}% of epoch)"
         )
 
         # --- TensorBoard Logging ---
