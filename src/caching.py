@@ -14,7 +14,11 @@ from src.dataset import (
     get_cache_manifest_path,
     normalize_source_path,
 )
-from src.utils import load_image_safely, rotate_right_angle
+from src.utils import (
+    load_image_safely,
+    rotate_right_angle,
+    validate_right_angle_rotations,
+)
 
 
 def process_and_cache_image(args):
@@ -23,37 +27,32 @@ def process_and_cache_image(args):
     creates four rotated versions, and saves them to the cache directory.
     """
     image_path, cache_dir = args
-    try:
-        source_path = normalize_source_path(image_path)
-        source_id = build_source_id(source_path)
+    source_path = normalize_source_path(image_path)
+    source_id = build_source_id(source_path)
 
-        # Use the single, robust image loader from utils
-        img = load_image_safely(source_path)
-        manifest_entries = []
+    # Use the single, robust image loader from utils
+    img = load_image_safely(source_path)
+    manifest_entries = []
 
-        # Use the rotation definition from config
-        for label, angle in config.ROTATIONS.items():
-            rotated_img = rotate_right_angle(img, angle)
-            cached_filename = f"{source_id}__{label}.png"
-            save_path = os.path.join(cache_dir, cached_filename)
-            rotated_img.save(
-                save_path,
-                "PNG",
-            )
-            manifest_entries.append(
-                {
-                    "source_path": source_path,
-                    "source_id": source_id,
-                    "cached_path": os.path.abspath(save_path),
-                    "label": label,
-                }
-            )
+    # Use the rotation definition from config
+    for label, angle in config.ROTATIONS.items():
+        rotated_img = rotate_right_angle(img, angle)
+        cached_filename = f"{source_id}__{label}.png"
+        save_path = os.path.join(cache_dir, cached_filename)
+        rotated_img.save(
+            save_path,
+            "PNG",
+        )
+        manifest_entries.append(
+            {
+                "source_path": source_path,
+                "source_id": source_id,
+                "cached_path": os.path.abspath(save_path),
+                "label": label,
+            }
+        )
 
-        return {"entries": manifest_entries, "failure": None}
-
-    except Exception as e:
-        logging.warning(f"Could not process and cache {image_path}. Error: {e}")
-        return {"entries": [], "failure": image_path}
+    return manifest_entries
 
 
 def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
@@ -61,6 +60,8 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
     Applies rotations to all images and saves them to a cache, using
     multiple processes.
     """
+    validate_right_angle_rotations(config.ROTATIONS)
+
     upright_dir = upright_dir or config.DATA_DIR
     cache_dir = config.CACHE_DIR
     manifest_path = get_cache_manifest_path(cache_dir)
@@ -119,16 +120,8 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
         )
 
     manifest_entries = []
-    failures = []
     for result in results:
-        manifest_entries.extend(result["entries"])
-        if result["failure"] is not None:
-            failures.append(result["failure"])
-
-    if failures:
-        logging.warning(
-            f"Warning: {len(failures)} out of {len(image_files)} images failed to process. Check logs for details."
-        )
+        manifest_entries.extend(result)
 
     manifest_entries.sort(key=lambda entry: (entry["source_path"], entry["label"]))
     with open(manifest_path, "w", encoding="utf-8") as handle:

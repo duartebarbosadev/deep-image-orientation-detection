@@ -24,6 +24,17 @@ def create_image(path, color):
     Image.new("RGB", (12, 8), color).save(path)
 
 
+def create_corner_marked_image(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    image = Image.new("RGB", (3, 2), "white")
+    pixels = image.load()
+    pixels[0, 0] = (255, 0, 0)
+    pixels[2, 0] = (0, 255, 0)
+    pixels[0, 1] = (0, 0, 255)
+    pixels[2, 1] = (255, 255, 0)
+    image.save(path)
+
+
 class DatasetSplitTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -67,6 +78,96 @@ class DatasetSplitTests(unittest.TestCase):
         self.assertEqual(len(train_dataset), len(train_files) * expected_rotations)
         self.assertEqual(len(val_dataset), len(val_files) * expected_rotations)
         self.assertTrue(set(train_dataset.image_files).isdisjoint(val_dataset.image_files))
+
+    def test_on_the_fly_dataset_applies_expected_right_angle_rotations(self):
+        image_path = os.path.join(self.data_dir, "geometry", "corner_markers.png")
+        create_corner_marked_image(image_path)
+
+        dataset = ImageOrientationDataset(
+            [image_path], transform=lambda image: image.copy()
+        )
+
+        expected_images = {
+            0: {
+                "size": (3, 2),
+                "corners": {
+                    (0, 0): (255, 0, 0),
+                    (2, 0): (0, 255, 0),
+                    (0, 1): (0, 0, 255),
+                    (2, 1): (255, 255, 0),
+                },
+            },
+            1: {
+                "size": (2, 3),
+                "corners": {
+                    (0, 0): (0, 255, 0),
+                    (1, 0): (255, 255, 0),
+                    (0, 2): (255, 0, 0),
+                    (1, 2): (0, 0, 255),
+                },
+            },
+            2: {
+                "size": (3, 2),
+                "corners": {
+                    (0, 0): (255, 255, 0),
+                    (2, 0): (0, 0, 255),
+                    (0, 1): (0, 255, 0),
+                    (2, 1): (255, 0, 0),
+                },
+            },
+            3: {
+                "size": (2, 3),
+                "corners": {
+                    (0, 0): (0, 0, 255),
+                    (1, 0): (255, 0, 0),
+                    (0, 2): (255, 255, 0),
+                    (1, 2): (0, 255, 0),
+                },
+            },
+        }
+
+        for label, expectation in expected_images.items():
+            rotated_image, returned_label = dataset[label]
+            self.assertEqual(returned_label.item(), label)
+            self.assertEqual(rotated_image.size, expectation["size"])
+            for coordinates, expected_color in expectation["corners"].items():
+                self.assertEqual(rotated_image.getpixel(coordinates), expected_color)
+
+    def test_on_the_fly_dataset_rejects_unsupported_rotation_config(self):
+        image_path = os.path.join(self.data_dir, "geometry", "plain.png")
+        create_image(image_path, "white")
+
+        original_rotations = config.ROTATIONS
+        self.addCleanup(setattr, config, "ROTATIONS", original_rotations)
+        config.ROTATIONS = {0: 0, 1: 45}
+
+        with self.assertRaisesRegex(
+            ValueError, "Unsupported rotation angles in config.ROTATIONS"
+        ):
+            ImageOrientationDataset([image_path], transform=None)
+
+    def test_on_the_fly_dataset_does_not_mask_loading_failures(self):
+        missing_path = os.path.join(self.data_dir, "geometry", "missing.png")
+        dataset = ImageOrientationDataset([missing_path], transform=None)
+
+        with self.assertRaises(FileNotFoundError):
+            dataset[0]
+
+    def test_cached_dataset_does_not_mask_loading_failures(self):
+        os.makedirs(self.cache_dir, exist_ok=True)
+        create_image(os.path.join(self.cache_dir, "present.png"), "white")
+        sample = {
+            "cached_path": os.path.join(self.cache_dir, "missing.png"),
+            "label": 0,
+        }
+        dataset = ImageOrientationDatasetFromCache(
+            self.cache_dir,
+            samples=[sample],
+            transform=None,
+        )
+
+        with self.assertRaises(FileNotFoundError):
+            dataset[0]
 
     def test_cached_dataset_filters_all_rotations_by_source_id(self):
         os.makedirs(self.cache_dir, exist_ok=True)

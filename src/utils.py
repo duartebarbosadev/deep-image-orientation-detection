@@ -116,3 +116,22 @@ def rotate_right_angle(image: Image.Image, angle: int) -> Image.Image:
     if transpose_op is None:
         return image
     return image.transpose(transpose_op)
+
+
+def validate_right_angle_rotations(rotations: dict) -> None:
+    """
+    Ensures a rotation configuration only contains supported right angles.
+    """
+    invalid_rotations = [
+        (label, angle)
+        for label, angle in rotations.items()
+        if angle % 360 not in RIGHT_ANGLE_ROTATIONS
+    ]
+    if invalid_rotations:
+        formatted_rotations = ", ".join(
+            f"label {label}: {angle}" for label, angle in invalid_rotations
+        )
+        raise ValueError(
+            "Unsupported rotation angles in config.ROTATIONS: "
+            f"{formatted_rotations}"
+        )

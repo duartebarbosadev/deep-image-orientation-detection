@@ -1,6 +1,5 @@
 import hashlib
 import json
-import logging
 import os
 import random
 
@@ -9,7 +8,12 @@ import torchvision.transforms as transforms
 from torch.utils.data import Dataset
 
 import config
-from src.utils import load_cached_image, load_image_safely, rotate_right_angle
+from src.utils import (
+    load_cached_image,
+    load_image_safely,
+    rotate_right_angle,
+    validate_right_angle_rotations,
+)
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
@@ -89,6 +93,7 @@ class ImageOrientationDataset(Dataset):
             raise ValueError("No image files were provided to the dataset.")
         self.transform = transform
         self.rotations = config.ROTATIONS
+        validate_right_angle_rotations(self.rotations)
         self.num_rotations = len(self.rotations)
 
     def __len__(self):
@@ -100,24 +105,14 @@ class ImageOrientationDataset(Dataset):
 
         image_path = self.image_files[image_idx]
         angle_to_rotate = self.rotations[label]
+        image = load_image_safely(image_path)
+        rotated_image = rotate_right_angle(image, angle_to_rotate)
 
-        try:
-            # Use the safe loader from utils
-            image = load_image_safely(image_path)
-            rotated_image = rotate_right_angle(image, angle_to_rotate)
-
-            if self.transform:
-                image_tensor = self.transform(rotated_image)
-            else:
-                # Default minimal transformation if none provided
-                image_tensor = transforms.ToTensor()(rotated_image)
-
-        except Exception as e:
-            logging.warning(
-                f"Warning: Could not open or process {image_path}. Skipping. Error: {e}"
-            )
-            # Return a random sample to avoid crashing the loader
-            return self.__getitem__(random.randint(0, len(self) - 1))
+        if self.transform:
+            image_tensor = self.transform(rotated_image)
+        else:
+            # Default minimal transformation if none provided
+            image_tensor = transforms.ToTensor()(rotated_image)
 
         return image_tensor, torch.tensor(label, dtype=torch.long)
 
@@ -156,20 +151,12 @@ class ImageOrientationDatasetFromCache(Dataset):
     def __getitem__(self, idx):
         sample = self.samples[idx]
         image_path = sample["cached_path"]
+        label = int(sample["label"])
+        image = load_cached_image(image_path)
 
-        try:
-            label = int(sample["label"])
-            image = load_cached_image(image_path)
-
-            if self.transform:
-                image_tensor = self.transform(image)
-            else:
-                image_tensor = transforms.ToTensor()(image)
-
-        except Exception as e:
-            logging.warning(
-                f"Could not read or process cached file {image_path}. Error: {e}"
-            )
-            return self.__getitem__(random.randint(0, len(self) - 1))
+        if self.transform:
+            image_tensor = self.transform(image)
+        else:
+            image_tensor = transforms.ToTensor()(image)
 
         return image_tensor, torch.tensor(label, dtype=torch.long)
