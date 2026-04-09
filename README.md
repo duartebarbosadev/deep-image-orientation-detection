@@ -97,6 +97,7 @@ python convert_to_onnx.py path/to/model.pth
 ```
 
 This will create a `model.onnx` file in the same directory.
+If you convert the default training output `models/best_model.pth`, the exporter writes `models/best_model.onnx`.
 
 To predict image orientation using the ONNX model:
 
@@ -110,6 +111,8 @@ To predict image orientation using the ONNX model:
   ```bash
   python predict_onnx.py --input_path /path/to/directory/
   ```
+
+By default, `predict_onnx.py` looks for `models/best_model.onnx`.
 
 #### ONNX GPU Acceleration (Optional)
 
