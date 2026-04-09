@@ -113,10 +113,9 @@ def build_train_val_datasets(args, data_transforms, split_state=None, split_seed
         )
 
     if config.USE_CACHE:
-        cache_num_workers = None if args.workers == 0 else args.workers
         cache_dataset(
             upright_dir=args.data_dir,
-            num_workers=cache_num_workers,
+            num_workers=args.workers,
             force_rebuild=args.force_rebuild_cache,
         )
         train_dataset = ImageOrientationDatasetFromCache(

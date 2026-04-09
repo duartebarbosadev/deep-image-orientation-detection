@@ -1,7 +1,7 @@
 import json
 import logging
 import os
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 
 import config
 from tqdm import tqdm
@@ -93,24 +93,36 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
     image_files = discover_upright_image_files(upright_dir)
 
     configured_workers = config.NUM_WORKERS if num_workers is None else num_workers
-    num_workers = configured_workers if configured_workers > 0 else cpu_count()
-    chunk_size = max(1, len(image_files) // max(1, num_workers * 8))
-    logging.info(
-        f"Building cache with {num_workers} worker processes (chunksize={chunk_size})..."
-    )
+    if configured_workers < 0:
+        raise ValueError("num_workers must be greater than or equal to 0.")
 
-    with Pool(processes=num_workers) as pool:
-        results = list(
-            tqdm(
-                pool.imap_unordered(
-                    process_and_cache_image,
-                    [(image_path, cache_dir) for image_path in image_files],
-                    chunksize=chunk_size,
-                ),
-                total=len(image_files),
-                desc="Caching Images",
-            )
+    cache_jobs = [(image_path, cache_dir) for image_path in image_files]
+    if configured_workers == 0:
+        logging.info("Building cache in the main process (workers=0).")
+        results = [
+            process_and_cache_image(job)
+            for job in tqdm(cache_jobs, total=len(cache_jobs), desc="Caching Images")
+        ]
+    else:
+        chunk_size = max(1, len(image_files) // max(1, configured_workers * 8))
+        logging.info(
+            "Building cache with %d worker processes (chunksize=%d)...",
+            configured_workers,
+            chunk_size,
         )
+
+        with Pool(processes=configured_workers) as pool:
+            results = list(
+                tqdm(
+                    pool.imap_unordered(
+                        process_and_cache_image,
+                        cache_jobs,
+                        chunksize=chunk_size,
+                    ),
+                    total=len(image_files),
+                    desc="Caching Images",
+                )
+            )
 
     manifest_entries = []
     for result in results:
