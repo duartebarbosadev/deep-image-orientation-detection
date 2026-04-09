@@ -8,7 +8,6 @@ import argparse
 import logging
 import time
 
-import torch.amp as amp
 import config
 from src.caching import cache_dataset
 from src.dataset import (
@@ -19,7 +18,15 @@ from src.dataset import (
     split_image_files,
 )
 from src.model import get_orientation_model
-from src.utils import get_device, setup_logging, get_data_transforms
+from src.utils import (
+    get_autocast_context,
+    get_grad_scaler,
+    get_device,
+    move_batch_to_device,
+    should_use_channels_last,
+    setup_logging,
+    get_data_transforms,
+)
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
 
@@ -166,12 +173,34 @@ def train(args):
     device = get_device()
     checkpoint_path = os.path.join(args.model_dir, "checkpoint.pth")
 
+    if hasattr(torch, "set_float32_matmul_precision"):
+        torch.set_float32_matmul_precision("high")
+        logging.info("Float32 matmul precision set to 'high'.")
+
     # Determine if pin_memory should be used
     pin_memory_enabled = device.type == "cuda"
     if pin_memory_enabled:
         logging.info("CUDA detected, pin_memory will be enabled for DataLoaders.")
     else:
         logging.info("CUDA not detected, pin_memory will be disabled.")
+
+    if device.type == "cuda":
+        logging.info("CUDA detected, automatic mixed precision will use bfloat16.")
+    elif device.type == "mps":
+        logging.info(
+            "MPS detected, automatic mixed precision will use float16 with GradScaler."
+        )
+    else:
+        logging.info(
+            f"Automatic mixed precision is disabled on {device.type.upper()}; "
+            "training will run in FP32."
+        )
+
+    channels_last_enabled = should_use_channels_last(device)
+    if channels_last_enabled:
+        logging.info(
+            f"{device.type.upper()} detected, channels-last tensors will be used for image batches."
+        )
 
     ### Dataset and Dataloader logic
     logging.info("\n--- Initializing Dataset and Dataloaders ---")
@@ -270,7 +299,13 @@ def train(args):
 
     logging.info("\n--- Setting up Model ---")
     # Store the original model instance
-    original_model = get_orientation_model().to(device)
+    original_model = get_orientation_model()
+    if channels_last_enabled:
+        original_model = original_model.to(
+            device=device, memory_format=torch.channels_last
+        )
+    else:
+        original_model = original_model.to(device)
 
     # This will be the model instance used for training/inference during the loop
     model_for_training = original_model
@@ -286,6 +321,7 @@ def train(args):
     optimizer = optim.AdamW(
         model_for_training.parameters(), lr=args.lr, weight_decay=1e-3
     )
+    scaler = get_grad_scaler(device)
     logging.info(
         f"Using pre-trained {config.MODEL_NAME} model. Final layers is trainable."
     )
@@ -314,6 +350,14 @@ def train(args):
             # Load optimizer and scheduler states
             optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+            scaler_state_dict = checkpoint.get("scaler_state_dict")
+            if scaler.is_enabled():
+                if scaler_state_dict:
+                    scaler.load_state_dict(scaler_state_dict)
+                elif scaler_state_dict == {}:
+                    logging.info(
+                        "Checkpoint has no active GradScaler state; using a fresh scaler."
+                    )
 
             # Load training progress
             start_epoch = checkpoint["epoch"] + 1
@@ -340,19 +384,25 @@ def train(args):
         model_for_training.train()
         running_loss, running_corrects = 0.0, 0
         for inputs, labels in train_loader:
-            inputs, labels = (
-                inputs.to(device, non_blocking=True),
-                labels.to(device, non_blocking=True),
+            inputs, labels = move_batch_to_device(
+                inputs,
+                labels,
+                device,
+                non_blocking=pin_memory_enabled,
             )
             optimizer.zero_grad(set_to_none=True)
 
-            with amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with get_autocast_context(device):
                 outputs = model_for_training(inputs)
                 loss = criterion(outputs, labels)
 
-            # Backpropagation without scaler
-            loss.backward()
-            optimizer.step()
+            if scaler.is_enabled():
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             _, preds = torch.max(outputs, 1)
             running_loss += loss.item() * inputs.size(0)
@@ -367,12 +417,14 @@ def train(args):
 
         with torch.no_grad():
             for inputs, labels in val_loader:
-                inputs, labels = (
-                    inputs.to(device, non_blocking=True),
-                    labels.to(device, non_blocking=True),
+                inputs, labels = move_batch_to_device(
+                    inputs,
+                    labels,
+                    device,
+                    non_blocking=pin_memory_enabled,
                 )
 
-                with amp.autocast(device_type="cuda", dtype=torch.bfloat16):
+                with get_autocast_context(device):
                     outputs = model_for_training(inputs)
                     loss = criterion(outputs, labels)
 
@@ -433,6 +485,7 @@ def train(args):
             "model_state_dict": original_model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
+            "scaler_state_dict": scaler.state_dict(),
             "best_val_acc": best_val_acc,
             "epochs_no_improve": epochs_no_improve,
             "split_seed": effective_split_seed,
