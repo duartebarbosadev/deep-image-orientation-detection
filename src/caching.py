@@ -14,7 +14,7 @@ from src.dataset import (
     get_cache_manifest_path,
     normalize_source_path,
 )
-from src.utils import load_image_safely
+from src.utils import load_image_safely, rotate_right_angle
 
 
 def process_and_cache_image(args):
@@ -33,10 +33,13 @@ def process_and_cache_image(args):
 
         # Use the rotation definition from config
         for label, angle in config.ROTATIONS.items():
-            rotated_img = img.rotate(angle, resample=Image.BICUBIC, expand=True)
+            rotated_img = rotate_right_angle(img, angle)
             cached_filename = f"{source_id}__{label}.png"
             save_path = os.path.join(cache_dir, cached_filename)
-            rotated_img.save(save_path, "PNG")
+            rotated_img.save(
+                save_path,
+                "PNG",
+            )
             manifest_entries.append(
                 {
                     "source_path": source_path,
@@ -97,7 +100,10 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
 
     configured_workers = config.NUM_WORKERS if num_workers is None else num_workers
     num_workers = configured_workers if configured_workers > 0 else cpu_count()
-    logging.info(f"Building cache with {num_workers} worker processes...")
+    chunk_size = max(1, len(image_files) // max(1, num_workers * 8))
+    logging.info(
+        f"Building cache with {num_workers} worker processes (chunksize={chunk_size})..."
+    )
 
     with Pool(processes=num_workers) as pool:
         results = list(
@@ -105,6 +111,7 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
                 pool.imap_unordered(
                     process_and_cache_image,
                     [(image_path, cache_dir) for image_path in image_files],
+                    chunksize=chunk_size,
                 ),
                 total=len(image_files),
                 desc="Caching Images",

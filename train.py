@@ -240,21 +240,24 @@ def train(args):
         f"Training samples: {len(train_dataset)}, Validation samples: {len(val_dataset)}."
     )
 
+    dataloader_kwargs = {
+        "batch_size": args.batch_size,
+        "num_workers": args.workers,
+        "pin_memory": pin_memory_enabled,
+        "persistent_workers": args.workers > 0,
+    }
+    if args.workers > 0:
+        dataloader_kwargs["prefetch_factor"] = config.DATALOADER_PREFETCH_FACTOR
+
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
         shuffle=True,
-        num_workers=args.workers,
-        pin_memory=pin_memory_enabled,
-        persistent_workers=args.workers > 0,
+        **dataloader_kwargs,
     )
     val_loader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
         shuffle=False,
-        num_workers=args.workers,
-        pin_memory=pin_memory_enabled,
-        persistent_workers=args.workers > 0,
+        **dataloader_kwargs,
     )
     logging.info("Dataloaders created successfully.")
 

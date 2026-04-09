@@ -6,11 +6,10 @@ import random
 
 import torch
 import torchvision.transforms as transforms
-from PIL import Image
 from torch.utils.data import Dataset
 
 import config
-from src.utils import load_image_safely
+from src.utils import load_cached_image, load_image_safely, rotate_right_angle
 
 
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
@@ -105,10 +104,7 @@ class ImageOrientationDataset(Dataset):
         try:
             # Use the safe loader from utils
             image = load_image_safely(image_path)
-            # Apply the selected rotation
-            rotated_image = image.rotate(
-                angle_to_rotate, resample=Image.BICUBIC, expand=True
-            )
+            rotated_image = rotate_right_angle(image, angle_to_rotate)
 
             if self.transform:
                 image_tensor = self.transform(rotated_image)
@@ -163,7 +159,7 @@ class ImageOrientationDatasetFromCache(Dataset):
 
         try:
             label = int(sample["label"])
-            image = load_image_safely(image_path)
+            image = load_cached_image(image_path)
 
             if self.transform:
                 image_tensor = self.transform(image)
