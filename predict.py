@@ -5,8 +5,15 @@ import logging
 import time
 
 import config
+from src.dataset import discover_image_files
 from src.model import get_orientation_model
-from src.utils import get_device, get_data_transforms, setup_logging, load_image_safely
+from src.utils import (
+    get_device,
+    get_data_transforms,
+    load_image_safely,
+    load_torch_artifact,
+    setup_logging,
+)
 
 
 def predict_single_image(model, image_path, device, transforms):
@@ -58,7 +65,7 @@ def run_prediction(args):
     model = get_orientation_model(pretrained=False)  # No need to download weights
 
     # Adjust state_dict keys if the model was compiled
-    state_dict = torch.load(args.model_path, map_location=device)
+    state_dict = load_torch_artifact(args.model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()
@@ -74,19 +81,14 @@ def run_prediction(args):
     elif os.path.isdir(input_path):
         print(f"Processing all images in directory: {input_path}")
         total_dir_start_time = time.time()  # Start timer for the entire directory
-        image_files = [
-            f
-            for f in os.listdir(input_path)
-            if f.lower().endswith((".png", ".jpg", ".jpeg"))
-        ]
-
-        if not image_files:
+        try:
+            image_files = discover_image_files(input_path)
+        except ValueError:
             print(f"No image files found in directory: {input_path}")
             return
 
         for image_file in image_files:
-            full_path = os.path.join(input_path, image_file)
-            predict_single_image(model, full_path, device, transforms)
+            predict_single_image(model, image_file, device, transforms)
 
         total_dir_end_time = time.time()  # End timer
         total_duration = total_dir_end_time - total_dir_start_time

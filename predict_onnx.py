@@ -4,11 +4,10 @@ import argparse
 import logging
 import time
 import onnxruntime
-import numpy as np
 
 import config
-import torchvision.transforms as T
-from src.utils import setup_logging, load_image_safely
+from src.utils import get_data_transforms, load_image_safely, setup_logging
+from src.dataset import discover_image_files
 
 
 def get_default_onnx_model_path() -> str:
@@ -62,15 +61,7 @@ def run_prediction_onnx(args):
         logging.error(f"ONNX model file not found at {args.model_path}.")
         return
 
-    # Define the same transformations used during validation.
-    image_transforms = T.Compose(
-        [
-            T.Resize((config.IMAGE_SIZE + 32, config.IMAGE_SIZE + 32)),
-            T.CenterCrop(config.IMAGE_SIZE),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
+    image_transforms = get_data_transforms()["val"]
 
     # Define a priority list for execution providers.
     # ONNX Runtime will try to use the first one in this list that is available on the system.
@@ -139,19 +130,14 @@ def run_prediction_onnx(args):
     elif os.path.isdir(input_path):
         print(f"Processing all images in directory: {input_path}")
         total_dir_start_time = time.time()  # Start timer for the entire directory
-        image_files = [
-            f
-            for f in os.listdir(input_path)
-            if f.lower().endswith((".png", ".jpg", ".jpeg"))
-        ]
-
-        if not image_files:
+        try:
+            image_files = discover_image_files(input_path)
+        except ValueError:
             print(f"No image files found in directory: {input_path}")
             return
 
         for image_file in image_files:
-            full_path = os.path.join(input_path, image_file)
-            predict_single_image_onnx(ort_session, full_path, image_transforms)
+            predict_single_image_onnx(ort_session, image_file, image_transforms)
 
         total_dir_end_time = time.time()  # End timer
         total_duration = total_dir_end_time - total_dir_start_time

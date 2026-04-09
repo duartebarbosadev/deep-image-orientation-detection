@@ -10,20 +10,20 @@ from torch.utils.data import Dataset
 
 import config
 from src.utils import (
+    discover_image_files,
     load_cached_image,
     load_image_safely,
+    normalize_image_path,
     rotate_right_angle,
     validate_right_angle_rotations,
 )
 
-
-IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 CACHE_MANIFEST_FILENAME = "manifest.json"
 
 
 def normalize_source_path(image_path: str) -> str:
     """Returns a canonical path for a source image."""
-    return os.path.normcase(os.path.realpath(image_path))
+    return normalize_image_path(image_path)
 
 
 def build_source_id(image_path: str) -> str:
@@ -34,17 +34,7 @@ def build_source_id(image_path: str) -> str:
 
 def discover_upright_image_files(upright_dir: str) -> list[str]:
     """Recursively discovers supported images under an upright image directory."""
-    image_files = []
-    for root, _, files in os.walk(upright_dir):
-        for filename in files:
-            if filename.lower().endswith(IMAGE_EXTENSIONS):
-                image_files.append(normalize_source_path(os.path.join(root, filename)))
-
-    image_files.sort()
-    if not image_files:
-        raise ValueError(f"No images found in the directory: {upright_dir}")
-
-    return image_files
+    return discover_image_files(upright_dir)
 
 
 def split_image_files(

@@ -1,18 +1,22 @@
 import torch.nn as nn
 import torchvision.models as models
-from config import NUM_CLASSES
+import config
 import logging
 
 
-def get_orientation_model(pretrained=True, num_blocks_to_unfreeze=2):
+def get_orientation_model(pretrained=True, num_blocks_to_unfreeze=None):
     """
     Loads a pre-trained EfficientNet model and configures it for fine-tuning.
 
     Args:
         pretrained (bool): Whether to load ImageNet weights.
-        num_blocks_to_unfreeze (int): How many of the final 8 feature blocks to unfreeze.
-                                     Set to 8 to unfreeze all feature blocks (full fine-tuning).
+        num_blocks_to_unfreeze (int | None): How many of the final 8 feature
+            blocks to unfreeze. Uses config.NUM_BLOCKS_TO_UNFREEZE when None.
+            Set to 8 to unfreeze all feature blocks (full fine-tuning).
     """
+    if num_blocks_to_unfreeze is None:
+        num_blocks_to_unfreeze = config.NUM_BLOCKS_TO_UNFREEZE
+
     weights = models.EfficientNet_V2_S_Weights.IMAGENET1K_V1 if pretrained else None
     model = models.efficientnet_v2_s(weights=weights)
 
@@ -39,7 +43,7 @@ def get_orientation_model(pretrained=True, num_blocks_to_unfreeze=2):
     # Replace the final fully connected layer.
     model.classifier = nn.Sequential(
         nn.Dropout(p=0.3, inplace=True),
-        nn.Linear(num_ftrs, NUM_CLASSES),
+        nn.Linear(num_ftrs, config.NUM_CLASSES),
     )
 
     return model
