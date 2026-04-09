@@ -10,6 +10,12 @@ from src.utils import get_device
 from config import IMAGE_SIZE
 
 
+def get_default_onnx_output_path(model_path: str) -> str:
+    """Returns the default ONNX path next to a PyTorch checkpoint."""
+    base_path = os.path.splitext(model_path)[0]
+    return f"{base_path}.onnx"
+
+
 def convert_to_onnx(model_path, onnx_file_name):
     # Instantiate and load the model
     device = get_device()
@@ -79,8 +85,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Create the output path for the ONNX model
-    base_path = os.path.splitext(args.model_path)[0]
-    onnx_file_name = f"{base_path}.onnx"
+    onnx_file_name = get_default_onnx_output_path(args.model_path)
 
     print(f"Converting model {args.model_path} to {onnx_file_name}")
     convert_to_onnx(args.model_path, onnx_file_name)

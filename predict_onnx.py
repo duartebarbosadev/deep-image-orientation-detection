@@ -11,6 +11,11 @@ import torchvision.transforms as T
 from src.utils import setup_logging, load_image_safely
 
 
+def get_default_onnx_model_path() -> str:
+    """Returns the ONNX path produced by converting the default best checkpoint."""
+    return os.path.join(config.MODEL_SAVE_DIR, "best_model.onnx")
+
+
 def predict_single_image_onnx(ort_session, image_path, image_transforms):
     """Predicts orientation for a single image file using the ONNX model and logs the time taken."""
 
@@ -170,7 +175,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model_path",
         type=str,
-        default=os.path.join(config.MODEL_SAVE_DIR, f"{config.MODEL_NAME}.onnx"),
+        default=get_default_onnx_model_path(),
         help="Path to the ONNX model file.",
     )
 
