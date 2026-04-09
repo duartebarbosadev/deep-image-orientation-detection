@@ -3,10 +3,10 @@ CACHE_DIR = "data/cache"
 
 # --- Dataloader and Preprocessing ---
 DATA_DIR = "data/upright_images"
-IMAGE_SIZE = 384
-BATCH_SIZE = 512  # Or More (eg. 512), depending on your GPU memory
-NUM_WORKERS = 16  # Or More (eg. 16), depending on your CPU cores
-DATALOADER_PREFETCH_FACTOR = 4  # Increase if the GPU is waiting on data; decrease if RAM usage is too high.
+IMAGE_SIZE = 384  # EfficientNetV2-S was pretrained at 384x384 — keep at 384 for best accuracy
+BATCH_SIZE = 64  # Or More (eg. 512), depending on your GPU memory
+NUM_WORKERS = 4  # Or More (eg. 16), depending on your CPU cores
+DATALOADER_PREFETCH_FACTOR = 2  # Increase if the GPU is waiting on data; decrease if RAM usage is too high. (increase if high data_ms in the logs)
 
 # --- Model Configuration ---
 MODEL_SAVE_DIR = "models"
