@@ -4,7 +4,7 @@ from config import NUM_CLASSES
 import logging
 
 
-def get_orientation_model(pretrained=True, num_blocks_to_unfreeze=5):
+def get_orientation_model(pretrained=True, num_blocks_to_unfreeze=2):
     """
     Loads a pre-trained EfficientNet model and configures it for fine-tuning.
 

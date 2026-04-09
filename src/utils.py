@@ -76,10 +76,11 @@ def get_grad_scaler(device: torch.device) -> torch.amp.GradScaler:
 
 def should_use_channels_last(device: torch.device) -> bool:
     """
-    Convolution-heavy models tend to run faster with channels-last tensors on
-    GPU backends, including CUDA and MPS.
+    Convolution-heavy models run faster with channels-last tensors on CUDA/cuDNN.
+    MPS is excluded: EfficientNet's internal .view() calls are incompatible with
+    the non-contiguous memory layout channels-last produces on MPS.
     """
-    return device.type in {"cuda", "mps"}
+    return device.type == "cuda"
 
 
 def move_batch_to_device(inputs, labels, device: torch.device, non_blocking: bool = False):
