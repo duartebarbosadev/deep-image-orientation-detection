@@ -1,6 +1,7 @@
 import torch
 import logging
 import sys
+from contextlib import nullcontext
 import torchvision.transforms as transforms
 from config import IMAGE_SIZE
 from PIL import Image, ImageOps
@@ -37,6 +38,63 @@ def get_device() -> torch.device:
         device = torch.device("cpu")
         logging.info("CUDA and MPS not available. Using CPU.")
     return device
+
+
+def get_amp_autocast_kwargs(device: torch.device):
+    """
+    Returns autocast settings for the selected device, or None when training
+    should run in standard FP32.
+    """
+    if device.type == "cuda":
+        return {"device_type": "cuda", "dtype": torch.bfloat16}
+    if device.type == "mps":
+        return {"device_type": "mps", "dtype": torch.float16}
+    return None
+
+
+def get_autocast_context(device: torch.device):
+    """
+    Returns a device-aware autocast context manager.
+    CUDA uses bfloat16 mixed precision, MPS uses float16 mixed precision,
+    and CPU stays in FP32.
+    """
+    autocast_kwargs = get_amp_autocast_kwargs(device)
+    if autocast_kwargs is None:
+        return nullcontext()
+    return torch.amp.autocast(**autocast_kwargs)
+
+
+def get_grad_scaler(device: torch.device) -> torch.amp.GradScaler:
+    """
+    Returns a GradScaler for device types that benefit from float16 AMP.
+    """
+    use_grad_scaler = device.type in {"cuda", "mps"}
+    return torch.amp.GradScaler(device=device.type, enabled=use_grad_scaler)
+
+
+def should_use_channels_last(device: torch.device) -> bool:
+    """
+    Convolution-heavy models tend to run faster with channels-last tensors on
+    GPU backends, including CUDA and MPS.
+    """
+    return device.type in {"cuda", "mps"}
+
+
+def move_batch_to_device(inputs, labels, device: torch.device, non_blocking: bool = False):
+    """
+    Moves a batch to the selected device and applies channels-last layout on
+    GPU backends to improve convolution throughput.
+    """
+    if should_use_channels_last(device) and getattr(inputs, "ndim", 0) == 4:
+        inputs = inputs.to(
+            device=device,
+            non_blocking=non_blocking,
+            memory_format=torch.channels_last,
+        )
+    else:
+        inputs = inputs.to(device=device, non_blocking=non_blocking)
+    labels = labels.to(device=device, non_blocking=non_blocking)
+    return inputs, labels
 
 
 def get_data_transforms() -> dict:
