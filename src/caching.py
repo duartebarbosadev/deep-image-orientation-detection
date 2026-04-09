@@ -3,8 +3,6 @@ import logging
 import os
 from multiprocessing import Pool, cpu_count
 
-from PIL import Image
-
 import config
 from tqdm import tqdm
 
@@ -30,19 +28,14 @@ def process_and_cache_image(args):
     source_path = normalize_source_path(image_path)
     source_id = build_source_id(source_path)
 
-    # Use the single, robust image loader from utils
     img = load_image_safely(source_path)
     manifest_entries = []
 
-    # Use the rotation definition from config
     for label, angle in config.ROTATIONS.items():
         rotated_img = rotate_right_angle(img, angle)
         cached_filename = f"{source_id}__{label}.png"
         save_path = os.path.join(cache_dir, cached_filename)
-        rotated_img.save(
-            save_path,
-            "PNG",
-        )
+        rotated_img.save(save_path, "PNG")
         manifest_entries.append(
             {
                 "source_path": source_path,
@@ -77,8 +70,8 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
         logging.info(
             f"Force rebuild is True. Clearing {len(cached_files)} cached files from cache directory: {cache_dir}"
         )
-        for f in cached_files:
-            os.remove(os.path.join(cache_dir, f))
+        for filename in cached_files:
+            os.remove(os.path.join(cache_dir, filename))
         if os.path.exists(manifest_path):
             os.remove(manifest_path)
         cached_files = []
@@ -90,8 +83,8 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
         return
     if cached_files or os.path.exists(manifest_path):
         logging.info("Cache contents and manifest are out of sync. Rebuilding cache...")
-        for f in cached_files:
-            os.remove(os.path.join(cache_dir, f))
+        for filename in cached_files:
+            os.remove(os.path.join(cache_dir, filename))
         if os.path.exists(manifest_path):
             os.remove(manifest_path)
 

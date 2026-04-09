@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import random
 
@@ -21,8 +22,8 @@ CACHE_MANIFEST_FILENAME = "manifest.json"
 
 
 def normalize_source_path(image_path: str) -> str:
-    """Returns a stable absolute path for a source image."""
-    return os.path.abspath(image_path)
+    """Returns a canonical path for a source image."""
+    return os.path.normcase(os.path.realpath(image_path))
 
 
 def build_source_id(image_path: str) -> str:
@@ -54,6 +55,8 @@ def split_image_files(
         raise ValueError("Cannot split an empty image list.")
     if len(image_files) < 2:
         raise ValueError("At least 2 source images are required for a train/val split.")
+    if not 0 < train_ratio < 1:
+        raise ValueError("train_ratio must be between 0 and 1 (exclusive).")
 
     shuffled_files = list(image_files)
     random.Random(seed).shuffle(shuffled_files)
@@ -136,6 +139,18 @@ class ImageOrientationDatasetFromCache(Dataset):
         if samples is None:
             source_id_set = set(source_ids)
             manifest = load_cache_manifest(cache_dir)
+            manifest_source_ids = {
+                sample["source_id"] for sample in manifest if "source_id" in sample
+            }
+            missing_source_ids = source_id_set - manifest_source_ids
+            if missing_source_ids:
+                logging.warning(
+                    "Cache manifest is missing %d requested source IDs. "
+                    "Matched %d of %d requested source images.",
+                    len(missing_source_ids),
+                    len(source_id_set) - len(missing_source_ids),
+                    len(source_id_set),
+                )
             samples = [
                 sample for sample in manifest if sample.get("source_id") in source_id_set
             ]
