@@ -311,10 +311,12 @@ def train(args):
     # This will be the model instance used for training/inference during the loop
     model_for_training = original_model
 
-    # Compile the model for performance if PyTorch 2.0+ is used
-    if hasattr(torch, "compile"):
-        logging.info("PyTorch 2.0+ detected. Compiling the model for performance...")
+    # Compile the model for performance — CUDA only (MPS/CPU don't benefit)
+    if hasattr(torch, "compile") and device.type == "cuda":
+        logging.info("CUDA detected. Compiling model with torch.compile (reduce-overhead)...")
         model_for_training = torch.compile(original_model, mode="reduce-overhead")
+    else:
+        logging.info(f"Skipping torch.compile (not supported efficiently on {device.type.upper()}).")
 
     criterion = nn.CrossEntropyLoss(label_smoothing=0.1)  # Add label_smoothing
 
@@ -424,7 +426,7 @@ def train(args):
 
             train_bar.set_postfix(
                 loss=f"{loss.item():.4f}",
-                data_ms=f"{train_data_time * 1000 / max(1, train_bar.n):.0f}",
+                data_ms=f"{train_data_time * 1000 / (train_bar.n + 1):.0f}",
             )
             batch_start = time.time()
 
@@ -466,7 +468,7 @@ def train(args):
 
                 val_bar.set_postfix(
                     loss=f"{loss.item():.4f}",
-                    data_ms=f"{val_data_time * 1000 / max(1, val_bar.n):.0f}",
+                    data_ms=f"{val_data_time * 1000 / (val_bar.n + 1):.0f}",
                 )
                 batch_start = time.time()
 
