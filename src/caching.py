@@ -11,6 +11,7 @@ from tqdm import tqdm
 from src.dataset import (
     build_source_id,
     discover_upright_image_files,
+    get_cache_failures_path,
     get_cache_manifest_path,
     normalize_source_path,
 )
@@ -23,8 +24,8 @@ def process_and_cache_image(args):
     creates four rotated versions, and saves them to the cache directory.
     """
     image_path, cache_dir = args
+    source_path = normalize_source_path(image_path)
     try:
-        source_path = normalize_source_path(image_path)
         source_id = build_source_id(source_path)
 
         # Use the single, robust image loader from utils
@@ -50,7 +51,13 @@ def process_and_cache_image(args):
 
     except Exception as e:
         logging.warning(f"Could not process and cache {image_path}. Error: {e}")
-        return {"entries": [], "failure": image_path}
+        return {
+            "entries": [],
+            "failure": {
+                "source_path": source_path,
+                "source_id": build_source_id(source_path),
+            },
+        }
 
 
 def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
@@ -61,6 +68,7 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
     upright_dir = upright_dir or config.DATA_DIR
     cache_dir = config.CACHE_DIR
     manifest_path = get_cache_manifest_path(cache_dir)
+    failures_path = get_cache_failures_path(cache_dir)
 
     if not os.path.exists(upright_dir):
         logging.error(f"Source data directory not found: {upright_dir}")
@@ -77,6 +85,8 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
             os.remove(os.path.join(cache_dir, f))
         if os.path.exists(manifest_path):
             os.remove(manifest_path)
+        if os.path.exists(failures_path):
+            os.remove(failures_path)
         cached_files = []
 
     if cached_files and os.path.exists(manifest_path):
@@ -90,6 +100,8 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
             os.remove(os.path.join(cache_dir, f))
         if os.path.exists(manifest_path):
             os.remove(manifest_path)
+        if os.path.exists(failures_path):
+            os.remove(failures_path)
 
     logging.info("Cache is empty or was cleared. Starting build process...")
 
@@ -119,9 +131,15 @@ def cache_dataset(upright_dir=None, num_workers=None, force_rebuild=False):
             failures.append(result["failure"])
 
     if failures:
+        failures.sort(key=lambda failure: failure["source_path"])
+        with open(failures_path, "w", encoding="utf-8") as handle:
+            json.dump(failures, handle, indent=2)
         logging.warning(
-            f"Warning: {len(failures)} out of {len(image_files)} images failed to process. Check logs for details."
+            f"Warning: {len(failures)} out of {len(image_files)} images failed to process. "
+            f"Failed source IDs were recorded in '{failures_path}'."
         )
+    elif os.path.exists(failures_path):
+        os.remove(failures_path)
 
     manifest_entries.sort(key=lambda entry: (entry["source_path"], entry["label"]))
     with open(manifest_path, "w", encoding="utf-8") as handle:

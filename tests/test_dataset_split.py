@@ -68,6 +68,13 @@ class DatasetSplitTests(unittest.TestCase):
         self.assertEqual(len(val_dataset), len(val_files) * expected_rotations)
         self.assertTrue(set(train_dataset.image_files).isdisjoint(val_dataset.image_files))
 
+    def test_split_helper_rejects_invalid_train_ratio(self):
+        discovered_files = discover_upright_image_files(self.data_dir)
+
+        for train_ratio in (0, 1, 1.2, -0.1):
+            with self.assertRaises(ValueError):
+                split_image_files(discovered_files, train_ratio=train_ratio)
+
     def test_cached_dataset_filters_all_rotations_by_source_id(self):
         os.makedirs(self.cache_dir, exist_ok=True)
 
@@ -115,6 +122,47 @@ class DatasetSplitTests(unittest.TestCase):
         val_counts = Counter(sample["source_id"] for sample in val_dataset.samples)
         self.assertTrue(all(count == expected_rotations for count in train_counts.values()))
         self.assertTrue(all(count == expected_rotations for count in val_counts.values()))
+
+    def test_cached_dataset_warns_when_manifest_is_missing_requested_source_ids(self):
+        os.makedirs(self.cache_dir, exist_ok=True)
+
+        discovered_files = discover_upright_image_files(self.data_dir)
+        requested_files = discovered_files[:3]
+        cached_files = requested_files[:2]
+
+        manifest = []
+        for source_path in cached_files:
+            source_id = build_source_id(source_path)
+            for label in config.ROTATIONS:
+                cached_path = os.path.join(self.cache_dir, f"{source_id}__{label}.png")
+                create_image(cached_path, "white")
+                manifest.append(
+                    {
+                        "source_path": os.path.abspath(source_path),
+                        "source_id": source_id,
+                        "cached_path": os.path.abspath(cached_path),
+                        "label": label,
+                    }
+                )
+
+        with open(get_cache_manifest_path(self.cache_dir), "w", encoding="utf-8") as handle:
+            json.dump(manifest, handle)
+
+        requested_source_ids = [build_source_id(path) for path in requested_files]
+        with self.assertLogs(level="WARNING") as captured_logs:
+            dataset = ImageOrientationDatasetFromCache(
+                self.cache_dir,
+                source_ids=requested_source_ids,
+                transform=None,
+            )
+
+        self.assertEqual(len(dataset), len(cached_files) * len(config.ROTATIONS))
+        self.assertTrue(
+            any(
+                "Cache manifest is missing 1 requested source IDs" in line
+                for line in captured_logs.output
+            )
+        )
 
     def test_build_train_val_datasets_smoke(self):
         args = SimpleNamespace(
@@ -176,6 +224,14 @@ class DatasetSplitTests(unittest.TestCase):
         self.assertEqual(train_files, expected_train_files)
         self.assertEqual(val_files, expected_val_files)
         self.assertTrue(set(train_files).isdisjoint(val_files))
+
+    def test_load_saved_split_state_rejects_non_object_json(self):
+        split_state_path = train_module.get_split_state_path(self.temp_dir.name)
+        with open(split_state_path, "w", encoding="utf-8") as handle:
+            json.dump(["not", "an", "object"], handle)
+
+        with self.assertRaises(ValueError):
+            train_module.load_saved_split_state(self.temp_dir.name)
 
 
 if __name__ == "__main__":

@@ -39,6 +39,9 @@ def load_saved_split_state(model_dir: str):
     with open(split_state_path, "r", encoding="utf-8") as handle:
         split_state = json.load(handle)
 
+    if not isinstance(split_state, dict):
+        raise ValueError(f"Invalid split state file: '{split_state_path}'.")
+
     train_image_files = split_state.get("train_image_files")
     val_image_files = split_state.get("val_image_files")
     if not isinstance(train_image_files, list) or not isinstance(val_image_files, list):
@@ -103,9 +106,10 @@ def build_train_val_datasets(args, data_transforms, split_state=None, split_seed
         )
 
     if config.USE_CACHE:
+        cache_num_workers = None if args.workers == 0 else args.workers
         cache_dataset(
             upright_dir=args.data_dir,
-            num_workers=args.workers,
+            num_workers=cache_num_workers,
             force_rebuild=args.force_rebuild_cache,
         )
         train_dataset = ImageOrientationDatasetFromCache(
@@ -174,6 +178,7 @@ def train(args):
     data_transforms = get_data_transforms()
     saved_split_state = None
     effective_split_seed = args.seed
+    resume_checkpoint = None
 
     if args.resume:
         try:
@@ -194,12 +199,12 @@ def train(args):
         else:
             logging.warning(
                 "Resume was requested but no saved split state was found. "
-                "Falling back to the current CLI seed."
+                "Falling back to checkpoint metadata if available, otherwise the current CLI seed."
             )
             if os.path.exists(checkpoint_path):
                 try:
-                    checkpoint_metadata = torch.load(checkpoint_path, map_location="cpu")
-                    saved_seed = checkpoint_metadata.get("split_seed")
+                    resume_checkpoint = torch.load(checkpoint_path, map_location=device)
+                    saved_seed = resume_checkpoint.get("split_seed")
                     if saved_seed is not None:
                         effective_split_seed = saved_seed
                         if saved_seed != args.seed:
@@ -211,6 +216,8 @@ def train(args):
                     logging.warning(
                         f"Could not read split seed from checkpoint metadata: {e}"
                     )
+
+    logging.info(f"  - Effective Train/Validation Split Seed: {effective_split_seed}")
 
     try:
         train_dataset, val_dataset, train_image_files, val_image_files = (
@@ -294,7 +301,9 @@ def train(args):
     if args.resume and os.path.exists(checkpoint_path):
         logging.info(f"\n--- Resuming training from checkpoint: {checkpoint_path} ---")
         try:
-            checkpoint = torch.load(checkpoint_path, map_location=device)
+            checkpoint = resume_checkpoint
+            if checkpoint is None:
+                checkpoint = torch.load(checkpoint_path, map_location=device)
 
             # Load model state
             original_model.load_state_dict(checkpoint["model_state_dict"])
