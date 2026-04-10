@@ -202,6 +202,9 @@ venv/
 .idea/
 
 # Data & Models (often large and shouldn't be in git)
-data/
+data/**
+!data/upright_images/
+data/upright_images/**
+!data/upright_images/readme.md
 models/*
 runs/
