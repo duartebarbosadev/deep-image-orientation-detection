@@ -347,6 +347,33 @@ class DatasetSplitTests(unittest.TestCase):
             force_rebuild=False,
         )
 
+    def test_drop_last_training_batch_stays_enabled_for_full_cuda_batches(self):
+        self.assertTrue(
+            train_module.should_drop_last_training_batch(
+                dataset_size=64,
+                batch_size=64,
+                compile_for_training=True,
+            )
+        )
+
+    def test_drop_last_training_batch_is_disabled_for_small_cuda_datasets(self):
+        self.assertFalse(
+            train_module.should_drop_last_training_batch(
+                dataset_size=63,
+                batch_size=64,
+                compile_for_training=True,
+            )
+        )
+
+    def test_drop_last_training_batch_is_disabled_without_compile(self):
+        self.assertFalse(
+            train_module.should_drop_last_training_batch(
+                dataset_size=128,
+                batch_size=64,
+                compile_for_training=False,
+            )
+        )
+
     def test_cache_dataset_honors_upright_dir_and_zero_workers(self):
         cache_dir = os.path.join(self.temp_dir.name, "cache_out")
         original_cache_dir = config.CACHE_DIR

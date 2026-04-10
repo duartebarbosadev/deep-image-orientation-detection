@@ -105,40 +105,72 @@ def get_orientation_model(pretrained: bool = True):
     return model
 
 
-def predict_single_image(model, image_path, device, transforms):
-    """Predicts orientation for a single image file and logs the time taken."""
+def iter_batches(items, batch_size):
+    for start in range(0, len(items), batch_size):
+        yield items[start : start + batch_size]
 
-    start_time = time.time()  # Start timer
 
-    try:
-        image = load_image_safely(image_path)
-    except FileNotFoundError:
-        print(f"File not found: {image_path}")
-        return
-    except Exception as e:
-        print(f"Error opening image {image_path}: {e}")
-        return
+def collect_input_images(input_path: str) -> list[str]:
+    if os.path.isfile(input_path):
+        return [input_path]
+    if os.path.isdir(input_path):
+        return discover_image_files(input_path)
+    raise ValueError(f"Input path is not a valid file or directory: {input_path}")
 
-    input_tensor = transforms(image).unsqueeze(0).to(device)
 
+def build_input_batch(image_paths, transforms):
+    valid_paths = []
+    image_tensors = []
+
+    for image_path in image_paths:
+        try:
+            image = load_image_safely(image_path)
+        except FileNotFoundError:
+            print(f"File not found: {image_path}")
+            continue
+        except Exception as exc:
+            print(f"Error opening image {image_path}: {exc}")
+            continue
+
+        image_tensors.append(transforms(image))
+        valid_paths.append(image_path)
+
+    if not image_tensors:
+        return [], None
+
+    return valid_paths, torch.stack(image_tensors)
+
+
+def predict_image_batch(model, image_paths, device, transforms):
+    valid_paths, input_batch = build_input_batch(image_paths, transforms)
+    if input_batch is None:
+        return 0
+
+    start_time = time.time()
+    input_batch = input_batch.to(device)
     with torch.no_grad():
-        output = model(input_tensor)
-        _, predicted_idx = torch.max(output, 1)
+        outputs = model(input_batch)
+        predicted_indices = torch.argmax(outputs, dim=1).tolist()
+    duration = time.time() - start_time
 
-    predicted_class = predicted_idx.item()
-    result = config.CLASS_MAP[predicted_class]
-
-    end_time = time.time()  # End timer
-    duration = end_time - start_time
+    for image_path, predicted_class in zip(valid_paths, predicted_indices):
+        result = config.CLASS_MAP[predicted_class]
+        print(
+            f"-> Image: '{os.path.basename(image_path)}' | Prediction: {result}"
+        )
 
     print(
-        f"-> Image: '{os.path.basename(image_path)}' | Prediction: {result} (Took {duration:.4f} seconds)"
+        f"Processed batch of {len(valid_paths)} image(s) in {duration:.4f} seconds."
     )
+    return len(valid_paths)
 
 
-def run_prediction(args):
-    """Main prediction routine."""
+def run_batch_prediction(args):
     setup_logging()
+
+    if args.batch_size <= 0:
+        logging.error("Batch size must be a positive integer.")
+        return
 
     if not os.path.exists(args.model_path):
         logging.error(
@@ -146,50 +178,48 @@ def run_prediction(args):
         )
         return
 
-    device = get_device()
-    all_transforms = get_data_transforms()
-    transforms = all_transforms["val"]
-
-    # Load the trained model
-    model = get_orientation_model(pretrained=False)  # No need to download weights
-
-    # Adjust state_dict keys if the model was compiled
-    state_dict = load_torch_artifact(args.model_path, map_location=device)
-    model.load_state_dict(state_dict)
-    model.to(device)
-    model.eval()
-
     input_path = args.input_path
     if not os.path.exists(input_path):
         logging.error(f"Input path does not exist: {input_path}")
         return
 
-    if os.path.isfile(input_path):
+    try:
+        image_files = collect_input_images(input_path)
+    except ValueError as exc:
+        print(exc)
+        return
+
+    device = get_device()
+    transforms = get_data_transforms()["val"]
+
+    model = get_orientation_model(pretrained=False)
+    state_dict = load_torch_artifact(args.model_path, map_location=device)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+
+    if len(image_files) == 1 and os.path.isfile(input_path):
         print(f"Processing single image: {input_path}")
-        predict_single_image(model, input_path, device, transforms)
-    elif os.path.isdir(input_path):
-        print(f"Processing all images in directory: {input_path}")
-        total_dir_start_time = time.time()  # Start timer for the entire directory
-        try:
-            image_files = discover_image_files(input_path)
-        except ValueError:
-            print(f"No image files found in directory: {input_path}")
-            return
-
-        for image_file in image_files:
-            predict_single_image(model, image_file, device, transforms)
-
-        total_dir_end_time = time.time()  # End timer
-        total_duration = total_dir_end_time - total_dir_start_time
-        print(
-            f"Finished processing directory '{input_path}'. Total time: {total_duration:.4f} seconds for {len(image_files)} images."
-        )
     else:
-        print(f"Input path is not a valid file or directory: {input_path}")
+        print(
+            f"Processing {len(image_files)} image(s) from directory in batches of {args.batch_size}: {input_path}"
+        )
+
+    total_dir_start_time = time.time()
+    processed_count = 0
+    for image_batch in iter_batches(image_files, args.batch_size):
+        processed_count += predict_image_batch(model, image_batch, device, transforms)
+
+    total_duration = time.time() - total_dir_start_time
+    print(
+        f"Finished processing '{input_path}'. Total time: {total_duration:.4f} seconds for {processed_count} images."
+    )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Predict image orientation.")
+    parser = argparse.ArgumentParser(
+        description="Predict image orientation in batches."
+    )
     parser.add_argument(
         "--input_path",
         type=str,
@@ -202,6 +232,11 @@ if __name__ == "__main__":
         default=os.path.join(config.MODEL_SAVE_DIR, "best_model.pth"),
         help="Path to the trained model file.",
     )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=32,
+        help="Number of images to process per inference batch.",
+    )
 
-    args = parser.parse_args()
-    run_prediction(args)
+    run_batch_prediction(parser.parse_args())

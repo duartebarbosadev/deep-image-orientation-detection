@@ -28,6 +28,7 @@ from src.utils import (
     should_use_channels_last,
     setup_logging,
     get_data_transforms,
+    load_torch_artifact,
 )
 import torch.optim.lr_scheduler as lr_scheduler
 from torch.utils.tensorboard import SummaryWriter
@@ -144,6 +145,16 @@ def build_train_val_datasets(args, data_transforms, split_state=None, split_seed
     return train_dataset, val_dataset, train_image_files, val_image_files
 
 
+def should_drop_last_training_batch(
+    dataset_size: int, batch_size: int, compile_for_training: bool
+) -> bool:
+    """
+    Keeps fixed training batch shapes for compiled CUDA runs without dropping
+    the only batch when the dataset is smaller than the configured batch size.
+    """
+    return compile_for_training and dataset_size >= batch_size
+
+
 def train(args):
     """Main training routine."""
     setup_logging()
@@ -233,7 +244,9 @@ def train(args):
             )
             if os.path.exists(checkpoint_path):
                 try:
-                    resume_checkpoint = torch.load(checkpoint_path, map_location=device)
+                    resume_checkpoint = load_torch_artifact(
+                        checkpoint_path, map_location=device
+                    )
                     saved_seed = resume_checkpoint.get("split_seed")
                     if saved_seed is not None:
                         effective_split_seed = saved_seed
@@ -286,9 +299,26 @@ def train(args):
     if args.workers > 0:
         dataloader_kwargs["prefetch_factor"] = config.DATALOADER_PREFETCH_FACTOR
 
+    compile_for_training = hasattr(torch, "compile") and device.type == "cuda"
+    drop_last_training_batch = should_drop_last_training_batch(
+        len(train_dataset),
+        args.batch_size,
+        compile_for_training,
+    )
+    if drop_last_training_batch:
+        logging.info(
+            "Enabling drop_last on the training DataLoader to keep CUDA Graph input shapes fixed."
+        )
+    elif compile_for_training:
+        logging.info(
+            "Skipping drop_last because the training dataset is smaller than the batch size; "
+            "otherwise CUDA training would perform zero optimization steps."
+        )
+
     train_loader = DataLoader(
         train_dataset,
         shuffle=True,
+        drop_last=drop_last_training_batch,
         **dataloader_kwargs,
     )
     val_loader = DataLoader(
@@ -312,7 +342,7 @@ def train(args):
     model_for_training = original_model
 
     # Compile the model for performance — CUDA only (MPS/CPU don't benefit)
-    if hasattr(torch, "compile") and device.type == "cuda":
+    if compile_for_training:
         logging.info("CUDA detected. Compiling model with torch.compile (reduce-overhead)...")
         model_for_training = torch.compile(original_model, mode="reduce-overhead")
     else:
@@ -345,7 +375,7 @@ def train(args):
         try:
             checkpoint = resume_checkpoint
             if checkpoint is None:
-                checkpoint = torch.load(checkpoint_path, map_location=device)
+                checkpoint = load_torch_artifact(checkpoint_path, map_location=device)
 
             # Load model state
             original_model.load_state_dict(checkpoint["model_state_dict"])
@@ -385,7 +415,9 @@ def train(args):
 
         # --- Training Phase ---
         model_for_training.train()
-        running_loss, running_corrects = 0.0, 0
+        running_loss = torch.zeros((), device=device)
+        running_corrects = torch.zeros((), device=device, dtype=torch.long)
+        train_examples = 0
         train_data_time, train_compute_time = 0.0, 0.0
 
         train_bar = tqdm(
@@ -420,22 +452,26 @@ def train(args):
                 optimizer.step()
 
             _, preds = torch.max(outputs, 1)
-            running_loss += loss.item() * inputs.size(0)
-            running_corrects += torch.sum(preds == labels.data)
+            batch_size = inputs.size(0)
+            train_examples += batch_size
+            running_loss += loss.detach() * batch_size
+            running_corrects += torch.sum(preds == labels)
             train_compute_time += time.time() - compute_start
 
             train_bar.set_postfix(
-                loss=f"{loss.item():.4f}",
                 data_ms=f"{train_data_time * 1000 / (train_bar.n + 1):.0f}",
+                compute_ms=f"{train_compute_time * 1000 / (train_bar.n + 1):.0f}",
             )
             batch_start = time.time()
 
-        epoch_loss = running_loss / len(train_dataset)
-        epoch_acc = running_corrects.float() / len(train_dataset)
+        epoch_loss = running_loss.item() / max(train_examples, 1)
+        epoch_acc = running_corrects.item() / max(train_examples, 1)
 
         # --- Validation Phase ---
         model_for_training.eval()
-        val_loss, val_corrects = 0.0, 0
+        val_loss = torch.zeros((), device=device)
+        val_corrects = torch.zeros((), device=device, dtype=torch.long)
+        val_examples = 0
         val_data_time, val_compute_time = 0.0, 0.0
 
         val_bar = tqdm(
@@ -444,7 +480,7 @@ def train(args):
             leave=False,
             unit="batch",
         )
-        with torch.no_grad():
+        with torch.inference_mode():
             batch_start = time.time()
             for inputs, labels in val_bar:
                 val_data_time += time.time() - batch_start
@@ -462,18 +498,20 @@ def train(args):
                     loss = criterion(outputs, labels)
 
                 _, preds = torch.max(outputs, 1)
-                val_loss += loss.item() * inputs.size(0)
-                val_corrects += torch.sum(preds == labels.data)
+                batch_size = inputs.size(0)
+                val_examples += batch_size
+                val_loss += loss.detach() * batch_size
+                val_corrects += torch.sum(preds == labels)
                 val_compute_time += time.time() - compute_start
 
                 val_bar.set_postfix(
-                    loss=f"{loss.item():.4f}",
                     data_ms=f"{val_data_time * 1000 / (val_bar.n + 1):.0f}",
+                    compute_ms=f"{val_compute_time * 1000 / (val_bar.n + 1):.0f}",
                 )
                 batch_start = time.time()
 
-        val_epoch_loss = val_loss / len(val_dataset)
-        val_epoch_acc = val_corrects.float() / len(val_dataset)
+        val_epoch_loss = val_loss.item() / max(val_examples, 1)
+        val_epoch_acc = val_corrects.item() / max(val_examples, 1)
 
         scheduler.step()
 
@@ -505,7 +543,7 @@ def train(args):
         )
 
         # --- MODEL AND CHECKPOINT SAVING LOGIC ---
-        current_acc = val_epoch_acc.item()
+        current_acc = val_epoch_acc
         if current_acc > best_val_acc:
             best_val_acc = current_acc
             epochs_no_improve = 0  # Reset counter

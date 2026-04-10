@@ -1,10 +1,14 @@
 import torch
 import logging
 import sys
+import os
 from contextlib import nullcontext
 import torchvision.transforms as transforms
 from config import IMAGE_SIZE
 from PIL import Image, ImageOps
+
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
 
 
 RIGHT_ANGLE_ROTATIONS = {
@@ -22,6 +26,40 @@ def setup_logging():
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
+
+
+def normalize_image_path(image_path: str) -> str:
+    """Returns a canonical path for an image file."""
+    return os.path.normcase(os.path.realpath(image_path))
+
+
+def discover_image_files(root_dir: str) -> list[str]:
+    """Recursively discovers supported images under a directory."""
+    image_files = []
+    for root, _, files in os.walk(root_dir):
+        for filename in files:
+            if filename.lower().endswith(IMAGE_EXTENSIONS):
+                image_files.append(normalize_image_path(os.path.join(root, filename)))
+
+    image_files.sort()
+    if not image_files:
+        raise ValueError(f"No images found in the directory: {root_dir}")
+
+    return image_files
+
+
+def load_torch_artifact(path: str, map_location=None):
+    """
+    Loads a PyTorch checkpoint using weights_only=True to avoid executing
+    arbitrary code from untrusted files.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=True)
+    except TypeError as exc:
+        raise RuntimeError(
+            "This project requires a PyTorch version that supports "
+            "torch.load(..., weights_only=True)."
+        ) from exc
 
 
 def get_device() -> torch.device:

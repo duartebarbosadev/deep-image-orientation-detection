@@ -6,7 +6,7 @@ import numpy as np
 import argparse
 import os
 from src.model import get_orientation_model
-from src.utils import get_device
+from src.utils import get_device, load_torch_artifact
 from config import IMAGE_SIZE
 
 
@@ -22,7 +22,7 @@ def convert_to_onnx(model_path, onnx_file_name):
     model = get_orientation_model(pretrained=False)
 
     # Adjust state_dict keys if the model was compiled
-    state_dict = torch.load(model_path, map_location=device)
+    state_dict = load_torch_artifact(model_path, map_location=device)
     model.load_state_dict(state_dict)
     model.to(device)
     model.eval()

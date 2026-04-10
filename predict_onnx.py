@@ -1,14 +1,73 @@
-import torch
-import os
 import argparse
 import logging
+import os
+import sys
 import time
+
 import onnxruntime
-import numpy as np
+import torch
+import torchvision.transforms as transforms
 
 import config
-import torchvision.transforms as T
-from src.utils import setup_logging, load_image_safely
+from PIL import Image, ImageOps
+
+
+IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg")
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
+
+
+def normalize_image_path(image_path: str) -> str:
+    return os.path.normcase(os.path.realpath(image_path))
+
+
+def discover_image_files(root_dir: str) -> list[str]:
+    image_files = []
+    for root, _, files in os.walk(root_dir):
+        for filename in files:
+            if filename.lower().endswith(IMAGE_EXTENSIONS):
+                image_files.append(normalize_image_path(os.path.join(root, filename)))
+
+    image_files.sort()
+    if not image_files:
+        raise ValueError(f"No images found in the directory: {root_dir}")
+
+    return image_files
+
+
+def get_data_transforms() -> dict:
+    return {
+        "val": transforms.Compose(
+            [
+                transforms.Resize((config.IMAGE_SIZE + 32, config.IMAGE_SIZE + 32)),
+                transforms.CenterCrop(config.IMAGE_SIZE),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225],
+                ),
+            ]
+        )
+    }
+
+
+def load_image_safely(path: str) -> Image.Image:
+    with Image.open(path) as img:
+        img = ImageOps.exif_transpose(img)
+
+        if img.mode in ("RGB", "L"):
+            return img.convert("RGB")
+
+        rgba_img = img.convert("RGBA")
+        background = Image.new("RGB", rgba_img.size, (255, 255, 255))
+        background.paste(rgba_img, mask=rgba_img)
+        return background
 
 
 def get_default_onnx_model_path() -> str:
@@ -62,15 +121,7 @@ def run_prediction_onnx(args):
         logging.error(f"ONNX model file not found at {args.model_path}.")
         return
 
-    # Define the same transformations used during validation.
-    image_transforms = T.Compose(
-        [
-            T.Resize((config.IMAGE_SIZE + 32, config.IMAGE_SIZE + 32)),
-            T.CenterCrop(config.IMAGE_SIZE),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ]
-    )
+    image_transforms = get_data_transforms()["val"]
 
     # Define a priority list for execution providers.
     # ONNX Runtime will try to use the first one in this list that is available on the system.
@@ -139,19 +190,14 @@ def run_prediction_onnx(args):
     elif os.path.isdir(input_path):
         print(f"Processing all images in directory: {input_path}")
         total_dir_start_time = time.time()  # Start timer for the entire directory
-        image_files = [
-            f
-            for f in os.listdir(input_path)
-            if f.lower().endswith((".png", ".jpg", ".jpeg"))
-        ]
-
-        if not image_files:
+        try:
+            image_files = discover_image_files(input_path)
+        except ValueError:
             print(f"No image files found in directory: {input_path}")
             return
 
         for image_file in image_files:
-            full_path = os.path.join(input_path, image_file)
-            predict_single_image_onnx(ort_session, full_path, image_transforms)
+            predict_single_image_onnx(ort_session, image_file, image_transforms)
 
         total_dir_end_time = time.time()  # End timer
         total_duration = total_dir_end_time - total_dir_start_time

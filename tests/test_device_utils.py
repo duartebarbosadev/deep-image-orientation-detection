@@ -36,8 +36,8 @@ class DeviceUtilsTests(unittest.TestCase):
     def test_grad_scaler_is_disabled_for_cpu(self):
         self.assertFalse(get_grad_scaler(torch.device("cpu")).is_enabled())
 
-    def test_channels_last_is_enabled_for_mps(self):
-        self.assertTrue(should_use_channels_last(torch.device("mps")))
+    def test_channels_last_is_disabled_for_mps(self):
+        self.assertFalse(should_use_channels_last(torch.device("mps")))
 
     def test_channels_last_is_disabled_for_cpu(self):
         self.assertFalse(should_use_channels_last(torch.device("cpu")))

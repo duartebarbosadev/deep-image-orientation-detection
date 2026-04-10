@@ -10,7 +10,7 @@ The model achieves **98.82% accuracy** on the validation set.
 
 ## Training Performance
 
-This model was trained on a single NVIDIA H100 GPU, taking **5 hours, 5 minutes and 37 seconds** to complete.
+This model (created with code on tag v2) was trained on a single NVIDIA H100 GPU, taking **5 hours, 5 minutes and 37 seconds** to complete.
 
 ## How It Works
 
